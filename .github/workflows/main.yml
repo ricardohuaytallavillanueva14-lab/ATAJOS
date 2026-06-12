@@ -1,0 +1,28 @@
+name: Firmar atajos de iOS
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  firmar:
+    runs-on: macos-14
+    steps:
+      - name: Descargar archivos del repositorio
+        uses: actions/checkout@v4
+
+      - name: Firmar todos los atajos
+        run: |
+          mkdir -p firmados
+          shopt -s nullglob
+          for f in *.shortcut; do
+            echo "Firmando: $f"
+            shortcuts sign -i "$f" -o "firmados/${f%.shortcut}-FIRMADO.shortcut" -m anyone
+          done
+          ls -la firmados
+
+      - name: Publicar atajos firmados para descargar
+        uses: actions/upload-artifact@v4
+        with:
+          name: atajos-firmados
+          path: firmados/
