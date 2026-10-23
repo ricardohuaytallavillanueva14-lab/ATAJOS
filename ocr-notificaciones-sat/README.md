@@ -43,6 +43,7 @@ El repositorio solo contiene software y documentación. Fotografías, Excel, lec
 - **Una sola lectura por foto**: la huella se calcula sobre los mismos bytes que recibe el OCR.
 - **Progreso y estimaciones**: barra `tqdm`, segundos por foto, horas restantes y resumen por lote.
 - **Celda de prueba** con muestra reproducible repartida entre carpetas.
+- **Motor automático**: `MOTOR = auto` comprueba PaddleOCR en un subproceso (una caída no afecta al cuaderno) y usa EasyOCR en GPU si falla, como ocurre con Python 3.13 en Colab; la celda 1 retira `langchain`, que rompe `paddlex`.
 - **Opciones de rendimiento**: `MODO_RAPIDO` (detector PP-OCRv5 mobile + reconocedor latino), `PADDLE_GPU` (requiere `paddlepaddle-gpu`; vuelve a CPU si falla) y `ORIENTACION_AUTO` para fotos giradas. TrOCR procesa las vistas del recorte en un solo lote.
 - **Alcance configurable** con `configurar(hoja, fecha_emision)`, aplicado por igual al índice, la evaluación y la escritura del XLSX.
 - **Compatibilidad**: las carpetas de resultados creadas con la versión anterior se abren sin cambios.
@@ -53,11 +54,12 @@ El sistema está diseñado para que **cada fecha escrita en el Excel sea atribui
 
 Cómo se lee la fecha manuscrita (celda 4):
 
-1. PaddleOCR localiza el rótulo impreso «FECHA DE NOTIFICACIÓN» y recorta solo ese recuadro, hasta «HORA DE NOTIFICACIÓN». Las demás fechas impresas del documento (emisión, títulos ejecutivos) quedan fuera del recorte.
+1. El detector impreso (PaddleOCR o, si este no puede inferir en el entorno, EasyOCR) localiza los rótulos «FECHA DE NOTIFICACIÓN» y «HORA DE NOTIFICACIÓN» por coincidencia aproximada (tolera lecturas como «HotECACLON» o rótulos partidos) y recorta solo ese recuadro, a resolución completa. Las demás fechas impresas del documento quedan fuera del recorte.
 2. Del recuadro se extraen tres vistas: color, contraste y **tinta azul aislada**. Esta última conserva únicamente los trazos de bolígrafo y elimina el texto impreso y las líneas de la tabla, que son la principal causa de lecturas erróneas en manuscritos.
-3. Tres lectores independientes leen las vistas: PaddleOCR (detección de texto), TrOCR manuscrito (Microsoft) y, si `LECTOR_VLM` está activo, el modelo de visión-lenguaje Qwen2.5-VL-3B con una instrucción que prohíbe inventar cifras.
+3. Tres lectores independientes leen las vistas: el detector impreso, TrOCR manuscrito (Microsoft) y, si `LECTOR_VLM` está activo, el modelo de visión-lenguaje Qwen2.5-VL-3B con una instrucción que prohíbe inventar cifras. En las actas de NEGATIVA la fecha escrita en «del día __/__/__» se cruza con la del recuadro.
 4. Las lecturas se comparan. **ALTA**: dos o más lectores leen exactamente la misma fecha y ninguno otra. **MEDIA**: solo un lector obtuvo fecha. **CONTRADICTORIA**: lecturas distintas. **SIN_FECHA**: nadie leyó una fecha completa. Nunca se completan dígitos ni se adivina el año.
-5. Alertas de plausibilidad: notificación más de `VENTANA_DIAS` (60) días después de la emisión, o en domingo. No bloquean, pero se muestran al revisor y quedan en el informe.
+5. Alertas de plausibilidad: notificación más de `VENTANA_DIAS` (60) días después de la emisión, en domingo, o resolución no leída (se confirma visualmente que es la REC UNO). No bloquean, pero se muestran al revisor y quedan en el informe.
+6. Tipos de documento: las REC completas se leen; AVISO PREVIO y CEDULÓN se marcan como anexos sin fecha para F; las medias páginas (encabezado en una foto y cargo en otra) se emparejan con la foto anterior de la carpeta y el revisor las confirma viendo ambas.
 
 Controles antes de escribir (celdas 5 y 6):
 
@@ -74,7 +76,7 @@ Cadena de evidencia que queda en Drive:
 - `acta_exportacion_*.json`: huellas SHA-256 del Excel original y de la copia generada, alcance, política de doble revisión y detalle de cada celda escrita.
 - La copia del Excel solo cambia las celdas aprobadas y su formato de fecha; el resto del archivo se conserva byte a byte (verificado por las pruebas).
 
-Límites que conviene declarar en cualquier uso formal: la exactitud de los lectores no se ha medido sobre este lote; la garantía proviene del cotejo humano y de la trazabilidad, no del OCR. Con la celda 3 puede estimarse la tasa de coincidencia en una muestra antes de la pasada completa.
+Límites que conviene declarar en cualquier uso formal: la garantía proviene del cotejo humano y de la trazabilidad, no del OCR. La celda 3 mide el acierto del OCR contra las filas que ya tienen F registrada en el Excel (patrón de referencia) sobre una muestra de 80 fotos antes de la pasada completa.
 
 ## Código y mantenimiento
 
