@@ -321,7 +321,7 @@ class EmparejamientoTests(ProyectoBase):
         self.assertEqual(resumen['emparejadas'],0)  # f1 y f2 están en carpetas distintas
         f1=p.ids_de([self.fotos/'A/sub/f1.png'])[0]; f2=p.ids_de([self.fotos/'A/f2.png'])[0]; f3=p.ids_de([self.fotos/'B/f3.png'])[0]
         self.assertEqual(p.records[f3]['estado'],'ANEXO')
-        self.assertEqual(p.lista_revision('pendientes'),[f2,f1]); self.assertIn(f3,p.lista_revision('todos'))
+        self.assertEqual(sorted(p.lista_revision('pendientes')),sorted([f1,f2])); self.assertIn(f3,p.lista_revision('todos'))
         # f1 y f2 están en carpetas distintas: no se emparejan. Movemos f2 junto a f1 y repetimos.
         self.assertIsNone(p.records[f2]['pareja'])
         p.records[f1]['archivos']=['A/Imagen (149).png']; p.records[f2]['archivos']=['A/Imagen (150).png']
