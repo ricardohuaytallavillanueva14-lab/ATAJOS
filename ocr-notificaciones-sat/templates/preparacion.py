@@ -52,7 +52,7 @@ if FOTOS_ESPERADAS and len(fotos) != FOTOS_ESPERADAS:
                        'Si cambió el conjunto de fotos, actualiza FOTOS_ESPERADAS (0 para no comprobar).')
 
 # Instalación: solo lo que falta o no coincide con la versión fijada. Colab ya trae torch con CUDA.
-deps = ['paddlepaddle==3.2.0', 'paddleocr==3.3.2', 'transformers==4.57.6',
+deps = ['paddlepaddle==3.2.0', 'paddleocr==3.3.2', 'easyocr>=1.7,<2', 'transformers==4.57.6',
         'torch>=2.6,<3', 'torchvision', 'sentencepiece', 'safetensors', 'accelerate>=1,<2',
         'openpyxl==3.1.5', 'Pillow>=10,<13', 'lxml>=5,<7', 'ipywidgets>=8,<9', 'tqdm>=4,<5']
 def version_instalada(nombre):
@@ -77,6 +77,10 @@ if REINSTALAR_DEPENDENCIAS or faltan:
                            'y vuelve a ejecutar esta celda; la segunda vez no reinstalará nada.')
 else:
     print('Dependencias ya instaladas con las versiones fijadas.')
+# paddlex importa langchain.docstore si langchain está instalado; Colab trae langchain 1.x, que ya no lo tiene.
+if version_instalada('langchain'):
+    print('Retirando langchain (incompatible con paddlex en Colab)...', flush=True)
+    subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', '-q', 'langchain'], check=False)
 
 # Verificar archivos individuales por nombre relativo y tamaño, si está el inventario.
 from openpyxl import load_workbook

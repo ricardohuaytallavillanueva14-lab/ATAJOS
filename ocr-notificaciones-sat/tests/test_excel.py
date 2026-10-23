@@ -86,7 +86,7 @@ class MotorFalso:
     def __init__(self):self.vistas=0
     def leer(self,src):
         self.vistas+=1
-        Image.open(src).load()
+        with Image.open(src) as im: im.load()
         return dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',fecha_notificacion='15/09/2026',
                     fecha_emision='02/09/2026',fecha_texto=None,observaciones=''),{'motor':self.nombre}
 
@@ -181,6 +181,11 @@ class FiabilidadTests(unittest.TestCase):
         self.assertEqual(c.dates_in_text('15 /09 /2026'),['2026-09-15'])
         self.assertEqual(c.dates_in_text('15 09  2026'),['2026-09-15'])
         self.assertEqual(c.dates_in_text('15092026'),['2026-09-15'])
+        self.assertEqual(c.dates_in_text('16/09/26'),['2026-09-16'])
+        self.assertEqual(c.dates_in_text('16 09 26'),['2026-09-16'])
+        self.assertEqual(c.dates_in_text('21/9/26 y 22/9/26'),['2026-09-21','2026-09-22'])
+        self.assertEqual(c.dates_in_text('160926'),[])
+        self.assertEqual(c.dates_in_text('Siendo las 9:00 horas, del dia 11/09/2026'),['2026-09-11'])
         self.assertEqual(c.dates_in_text('15-9-2026 y 03/06/2026'),['2026-06-03','2026-09-15'])
         self.assertEqual(c.dates_in_text('31022026'),[])
         self.assertEqual(c.dates_in_text('N 15 021 000021666'),[])
@@ -195,10 +200,11 @@ class FiabilidadTests(unittest.TestCase):
         try:
             c.configurar(ventana_dias=30)
             t={'emision':'2026-09-02'}
-            self.assertEqual(c.alertas({'fecha_notificacion':'15/09/2026'},t),[])
-            avisos=c.alertas({'fecha_notificacion':'15/12/2026'},t)
+            self.assertEqual(c.alertas({'fecha_notificacion':'15/09/2026','resolucion':'UNO'},t),[])
+            self.assertTrue(any('resoluci' in a for a in c.alertas({'fecha_notificacion':'15/09/2026'},t)))
+            avisos=c.alertas({'fecha_notificacion':'15/12/2026','resolucion':'UNO'},t)
             self.assertEqual(len(avisos),1); self.assertIn('104 días',avisos[0])
-            self.assertTrue(any('domingo' in a for a in c.alertas({'fecha_notificacion':'06/09/2026'},t)))
+            self.assertTrue(any('domingo' in a for a in c.alertas({'fecha_notificacion':'06/09/2026','resolucion':'UNO'},t)))
             with self.assertRaises(ValueError): c.configurar(ventana_dias=0)
         finally:
             c.VENTANA_DIAS=original
@@ -252,6 +258,86 @@ class ExportacionLegalTests(ProyectoBase):
         self.assertIsNotNone(xlsx)
         self.assertEqual(load_workbook(xlsx)['2026']['F2'].value.date(),date(2026,9,16))
 
+def caja(x1,y1,x2,y2,text,score=0.9):
+    return {'box':[[x1,y1],[x2,y1],[x2,y2],[x1,y2]],'text':text,'score':score}
+
+class LocalizacionTests(unittest.TestCase):
+    W,H=2200,2800
+    def test_rotulos_mal_leidos_por_easyocr(self):
+        rows=[caja(1000,1900,1500,1930,'FECHA DE HotECACLON:'),caja(1000,1990,1500,2020,'HORADENOIIECACKN:'),
+              caja(1000,2080,1500,2110,'FOLIOS ENTREGADOS:'),caja(100,1900,600,1930,'CARACTERISTICAS DEL LUGAR')]
+        roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
+        self.assertEqual(metodo,'rotulos_fecha_y_hora')
+        self.assertEqual((roi[1],roi[3]),(1930,1990)); self.assertLess(roi[0],1000); self.assertGreater(roi[2],1500)
+    def test_rotulo_partido_en_dos_detecciones(self):
+        rows=[caja(1000,1900,1180,1930,'FECHA DE'),caja(1190,1901,1500,1931,'NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
+        roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
+        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1931,1990))
+    def test_solo_hora_o_nada(self):
+        roi,metodo=c.localizar_recuadro_fecha([caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')],self.W,self.H)
+        self.assertEqual(metodo,'rotulo_hora'); self.assertEqual(roi[3],1990); self.assertLess(roi[1],1990)
+        roi,metodo=c.localizar_recuadro_fecha([caja(1000,1990,1500,2020,'FECHA Y HORA'),caja(1000,1890,1500,1920,'FOLIOS ENTREGADOS')],self.W,self.H)
+        self.assertIsNone(roi)
+        # 'HORA DE NOTIFICACION' no debe aceptarse como rótulo FECHA aunque se parezca.
+        roi,metodo=c.localizar_recuadro_fecha([caja(1000,1990,1500,2020,'HORA DE NOTIFICACION')],self.W,self.H)
+        self.assertEqual(metodo,'rotulo_hora')
+    def test_acta_negativa_y_clasificacion(self):
+        rows=[caja(100,1700,900,1730,'Siendo las 9:00 horas, del dia 11/09/2026 , quien suscribe'),
+              caja(1000,1900,1500,1930,'FECHA DE NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
+        self.assertEqual(c.fecha_acta_negativa(rows),['2026-09-11'])
+        head='EXPEDIENTE COACTIVO : 16-012-000008411-2026-SAT-H/DCC-IPA\nRESOLUCION DE EJECUCION COACTIVA'
+        self.assertEqual(c.clasificar_documento(head,rows,self.W,self.H,'16-012-000008411-2026'),'REC')
+        self.assertEqual(c.clasificar_documento(head,[],2480,1748,'16-012-000008411-2026'),'REC_SIN_CARGO')
+        self.assertEqual(c.clasificar_documento('texto suelto',rows,self.W,self.H,None),'CARGO_SIN_ENCABEZADO')
+        self.assertEqual(c.clasificar_documento('AVISO PREVIO DE NOTIFICACION',[],3307,2330,None),'ANEXO')
+        self.assertEqual(c.clasificar_documento('CEDULON',[],3307,2330,None),'ANEXO')
+        self.assertEqual(c.clasificar_documento('nada',[],self.W,self.H,None),'DESCONOCIDO')
+    def test_parse_header_resolucion_tolerante(self):
+        exp,code,res=c.parse_header('EXPEDIENTE COACTIVO : 16-012-000008411-2026-SAT-H/DCC-IPA\nCODIGO CONTRIBUYENTE: 000000066789\nResoluci6n N° UNO')
+        self.assertEqual((exp,code,res),('16-012-000008411-2026-SAT-H/DCC-IPA','66789','UNO'))
+        self.assertEqual(c.parse_header('RESOLUCLON N UNO')[2],'UNO')
+        self.assertIsNone(c.parse_header('texto sin resolucion')[2])
+        d=dict(expediente='16-012-1-2026',codigo='123',resolucion=None,fecha_notificacion='15/09/2026')
+        src=Path(tempfile.mkdtemp())/'o.xlsx'; libro_ficticio(src); index,_,_=c.build_index(src,('2026',))
+        self.assertEqual(c.evaluar(d,index)[1],[])
+        d['resolucion']='DOS'; self.assertTrue(any('REC UNO' in i for i in c.evaluar(d,index)[1]))
+
+class MotorMediaPagina(MotorFalso):
+    """Simula una REC partida en dos fotos: encabezado en una, cargo en la otra."""
+    def leer(self,src):
+        with Image.open(src) as im: color=im.getpixel((0,0))
+        base=dict(expediente=None,codigo=None,resolucion=None,fecha_notificacion=None,fecha_emision=None,fecha_texto=None,observaciones='')
+        if color[0]==0:   # f1: encabezado sin cargo
+            return dict(base,expediente='16-012-1-2026',codigo='123',resolucion='UNO'),{'motor':self.nombre,'tipo':'REC_SIN_CARGO'}
+        if color[0]==40:  # f2: cargo sin encabezado
+            return dict(base,fecha_notificacion='15/09/2026'),{'motor':self.nombre,'tipo':'CARGO_SIN_ENCABEZADO'}
+        return dict(base),{'motor':self.nombre,'tipo':'ANEXO'}
+
+class EmparejamientoTests(ProyectoBase):
+    def test_emparejar_y_medir(self):
+        p=self.proyecto()
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.inventario(); resumen=p.procesar(MotorMediaPagina(),limite=10)
+        self.assertEqual(resumen['emparejadas'],0)  # f1 y f2 están en carpetas distintas
+        f1=p.ids_de([self.fotos/'A/sub/f1.png'])[0]; f2=p.ids_de([self.fotos/'A/f2.png'])[0]; f3=p.ids_de([self.fotos/'B/f3.png'])[0]
+        self.assertEqual(p.records[f3]['estado'],'ANEXO')
+        self.assertEqual(p.lista_revision('pendientes'),[f2,f1]); self.assertIn(f3,p.lista_revision('todos'))
+        # f1 y f2 están en carpetas distintas: no se emparejan. Movemos f2 junto a f1 y repetimos.
+        self.assertIsNone(p.records[f2]['pareja'])
+        p.records[f1]['archivos']=['A/Imagen (149).png']; p.records[f2]['archivos']=['A/Imagen (150).png']
+        self.assertEqual(p.emparejar(),1)
+        self.assertEqual(p.records[f2]['pareja'],f1); self.assertEqual(p.records[f1]['pareja'],f2)
+        self.assertEqual(p.records[f2]['lectura']['expediente'],'16-012-1-2026')
+        self.assertEqual(p.records[f2]['destino']['celda'],'F2'); self.assertEqual(p.records[f2]['problemas'],[])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(p.resumen_alcance(),{'filas':5,'f_vacia':3,'f_registrada':2})
+        # Medición contra F ya registrada: la fila 3 (16-012-3) tiene 10/09/2026.
+        p.records[f2]['lectura'].update(expediente='16-012-3-2026',fecha_notificacion='10/09/2026')
+        p.records[f1]['lectura'].update(fecha_notificacion='11/09/2026',expediente='16-012-3-2026')
+        with contextlib.redirect_stdout(io.StringIO()):
+            res=p.medir_acierto()
+        self.assertEqual((res['con_referencia'],res['aciertos'],res['errores']),(2,1,1))
+
 class NotebookTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -274,6 +360,8 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('def configurar(',''.join(cells[1]['source']))
         self.assertIn('DOBLE_REVISION',''.join(cells[5]['source']))
         self.assertIn('LECTOR_VLM',''.join(cells[3]['source']))
+        self.assertIn('langchain',''.join(cells[0]['source']))
+        self.assertIn('medir_acierto',''.join(cells[2]['source']))
     def test_notebook_matches_templates(self):
         nb=json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(nb,self.builder.render(),'Ejecuta python scripts/build_notebook.py y confirma el cuaderno.')

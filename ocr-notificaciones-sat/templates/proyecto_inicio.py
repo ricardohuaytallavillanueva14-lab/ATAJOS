@@ -1,7 +1,7 @@
 # @title 2. Cargar el Excel, fijar el alcance y preparar el inventario
 HOJA_LOTE = '2026'  # @param {type:"string"}
 FECHA_EMISION_LOTE = '02/09/2026'  # @param {type:"string"}
-EXCEL_SHA_ESPERADO = '98012167fbeb97f1d28a724326dc2312f232e79acb8a19ff2e802ab04bac999f'  # @param {type:"string"}
+EXCEL_SHA_ESPERADO = '07545132e6379309f69c04b5449fe389f2c7ffab08b109c62e6045f3c672ef22'  # @param {type:"string"}
 RUTA_EXCEL_EN_DRIVE = ''  # @param {type:"string"}
 REHACER_INVENTARIO = False  # @param {type:"boolean"}
 # HOJA_LOTE y FECHA_EMISION_LOTE delimitan el lote: hoja anual y columna E (emisión REC).

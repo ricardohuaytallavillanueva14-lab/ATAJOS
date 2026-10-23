@@ -63,8 +63,9 @@ def vista_tinta(im, min_fraccion=0.002):
     import numpy as np
     hsv = np.asarray(im.convert('RGB').convert('HSV'), dtype=np.int16)
     h, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    # Azul/violeta en la escala 0-255 de PIL: aprox. 130-200. Impresión negra: saturación baja.
-    mascara = (sat > 45) & (val > 25) & (val < 245) & (h >= 120) & (h <= 205)
+    # Azul/violeta de bolígrafo en la escala 0-255 de PIL: aprox. 145-200 (el cian del escáner
+    # queda en ~128 y se excluye). Impresión negra: saturación baja.
+    mascara = (sat > 45) & (val > 25) & (val < 245) & (h >= 145) & (h <= 200)
     fraccion = float(mascara.mean())
     if fraccion < min_fraccion:
         return None, fraccion
@@ -75,7 +76,7 @@ def vista_tinta(im, min_fraccion=0.002):
 
 def familia_lector(vista):
     """Agrupa las vistas por lector independiente: paddle, trocr, vlm, deepseek."""
-    for prefijo in ('trocr', 'vlm', 'deepseek'):
+    for prefijo in ('trocr', 'vlm', 'deepseek', 'acta'):
         if str(vista).startswith(prefijo):
             return prefijo
     return 'paddle'
@@ -112,6 +113,8 @@ def alertas(data, target=None):
         avisos.append(f'La notificación es {(d - em).days} días posterior a la emisión (ventana habitual: {VENTANA_DIAS}). Verifica mes y año en la foto.')
     if d.weekday() == 6:
         avisos.append('La fecha cae en domingo; confirma el día en la foto.')
+    if (data or {}).get('resolucion') in (None, ''):
+        avisos.append('No se leyó el número de resolución; confirma en la foto que es la REC UNO.')
     return avisos
 
 
@@ -261,7 +264,7 @@ def evaluar(data, index):
                 issues.append('La notificación ya está registrada. Se conserva sin modificar.')
             if not codigo(data.get('codigo')) or codigo(data.get('codigo')) != target['codigo']:
                 issues.append('El código del contribuyente no coincide con el Excel o no se puede leer.')
-    if norm(data.get('resolucion')) not in {'uno','1','01','resolucionnuno','resolucionuno'}:
+    if data.get('resolucion') not in (None, '') and norm(data.get('resolucion')) not in {'uno','1','01','resolucionnuno','resolucionuno'}:
         issues.append('Esta versión solo llena la notificación de la REC UNO. Otra resolución requiere revisión aparte.')
     d = fecha(data.get('fecha_notificacion'))
     if d is None:
@@ -286,7 +289,15 @@ def parse_header(text):
     codes = re.findall(r'(?:CONTRIBUYENTE|SIGETI)\s*[:.;°ºN\s]*([0-9]{3,15})\b',clean)
     codes = {codigo(c) for c in codes}
     code = next(iter(codes)) if len(codes)==1 else None
-    resolution = re.findall(r'RESOLUCI[OÓ]N\s*(?:N[°ºO.]?\s*)?(UNO|DOS|TRES|\d+)\b',clean)
+    resolution = re.findall(r'RESOLUCI[OÓ0Ò]N\s*(?:N[°ºO.]?\s*)?(UNO|DOS|TRES|\d+)\b',clean)
+    if not resolution:
+        # Lectura aproximada: una palabra parecida a RESOLUCION seguida de UNO/DOS/TRES o un número.
+        tokens = re.findall(r'[A-ZÁÉÍÓÚÑ0-9°º]+', clean)
+        for i, tok in enumerate(tokens[:-1]):
+            if parecido(tok, 'resolucion', umbral=0.7, prefijo=5):
+                for sig in tokens[i+1:i+3]:
+                    if sig in ('UNO','DOS','TRES') or sig.isdigit():
+                        resolution.append(sig); break
     return exp,code,resolution[0] if len(set(resolution))==1 else None
 
 def dates_in_text(text):
@@ -294,6 +305,9 @@ def dates_in_text(text):
     matches = re.findall(r'(?<!\d)(\d{1,2})\s*[/ .-]\s*(\d{1,2})\s*[/ .-]\s*(20\d{2})(?!\d)',text)
     # Con la tinta aislada las barras finas pueden desaparecer: 8 cifras seguidas DDMMAAAA.
     matches += re.findall(r'(?<!\d)(\d{2})(\d{2})(20\d{2})(?!\d)',text)
+    # Año de dos cifras (16/09/26) solo con separadores, para no confundirlo con otros números.
+    matches += [(d,m,'20'+y) for d,m,y in re.findall(r'(?<!\d)(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{2})(?!\d)',text)]
+    matches += [(d,m,'20'+y) for d,m,y in re.findall(r'(?<!\d)(\d{1,2}) +(\d{1,2}) +(\d{2})(?!\d)',text)]
     out = set()
     for day,month,year in matches:
         try: out.add(date(int(year),int(month),int(day)).isoformat())
@@ -332,224 +346,336 @@ def seleccionar_muestra(paths, raiz, cantidad=30, semilla=2026):
     return seleccion
 
 
+def parecido(texto, objetivo, umbral=0.65, prefijo=4):
+    """Coincidencia aproximada tolerante al OCR: mismo inicio y similitud global mínima."""
+    import difflib
+    t = norm(texto)
+    if not t or t[:prefijo] != objetivo[:prefijo]:
+        return 0.0
+    r = difflib.SequenceMatcher(None, t, objetivo).ratio()
+    return r if r >= umbral else 0.0
+
+
+def agrupar_lineas(rows, tolerancia=0.6):
+    """Une detecciones que están en la misma línea (p. ej. 'FECHA DE' + 'NOTIFICACIÓN:')."""
+    items = []
+    for r in rows:
+        xs = [x for x, y in r['box']]; ys = [y for x, y in r['box']]
+        items.append({'x1': min(xs), 'x2': max(xs), 'y1': min(ys), 'y2': max(ys), 'text': r['text'], 'score': r.get('score', 0)})
+    items.sort(key=lambda i: (i['y1'], i['x1']))
+    lineas = []
+    for it in items:
+        h = max(1, it['y2'] - it['y1']); cy = (it['y1'] + it['y2']) / 2
+        for ln in lineas:
+            lcy = (ln['y1'] + ln['y2']) / 2; lh = max(1, ln['y2'] - ln['y1'])
+            if abs(cy - lcy) <= tolerancia * min(h, lh) and (it['x1'] - ln['x2']) < 3 * lh:
+                ln['text'] += ' ' + it['text']
+                ln['x1'] = min(ln['x1'], it['x1']); ln['x2'] = max(ln['x2'], it['x2'])
+                ln['y1'] = min(ln['y1'], it['y1']); ln['y2'] = max(ln['y2'], it['y2'])
+                break
+        else:
+            lineas.append(dict(it))
+    return lineas
+
+
+def localizar_recuadro_fecha(rows, ancho, alto):
+    """Ubica la casilla manuscrita bajo 'FECHA DE NOTIFICACIÓN' aunque el rótulo se lea mal.
+
+    rows: detecciones del pie de página con coordenadas en el mismo sistema que ancho/alto.
+    Devuelve (roi (x1,y1,x2,y2), método) o (None, motivo). Estrategias, en orden:
+    1. Rótulo FECHA (aproximado) y rótulo HORA debajo: casilla entre ambos.
+    2. Solo rótulo FECHA: casilla de ~2,6 alturas de línea bajo él.
+    3. Solo rótulo HORA: casilla justo encima, de la misma altura que la de HORA.
+    """
+    lineas = agrupar_lineas(rows)
+    fechas = sorted(((parecido(l['text'], 'fechadenotificacion'), l) for l in lineas), key=lambda t: -t[0])
+    horas = sorted(((parecido(l['text'], 'horadenotificacion'), l) for l in lineas), key=lambda t: -t[0])
+    fecha = fechas[0][1] if fechas and fechas[0][0] > 0 else None
+    hora = None
+    for score, l in horas:
+        if score <= 0:
+            break
+        if fecha is None or (l['y1'] > fecha['y2'] and abs(l['x1'] - fecha['x1']) < 0.25 * ancho):
+            hora = l; break
+    if fecha is None and hora is None:
+        return None, 'No se localizó ningún rótulo FECHA/HORA DE NOTIFICACIÓN.'
+    if fecha is not None:
+        lh = max(10, fecha['y2'] - fecha['y1'])
+        top = fecha['y2']
+        bottom = hora['y1'] if hora is not None and top < hora['y1'] < top + lh * 6 else min(alto, top + lh * 2.6)
+        x1, x2 = fecha['x1'], fecha['x2']
+        metodo = 'rotulos_fecha_y_hora' if hora is not None else 'rotulo_fecha'
+    else:
+        lh = max(10, hora['y2'] - hora['y1'])
+        bottom = hora['y1']; top = max(0, bottom - lh * 2.6)
+        x1, x2 = hora['x1'], hora['x2']
+        metodo = 'rotulo_hora'
+    roi = (max(0, int(x1 - 0.015 * ancho)), max(0, int(top)), min(ancho, int(x2 + 0.02 * ancho)), min(alto, int(bottom)))
+    if roi[3] - roi[1] < 8 or roi[2] - roi[0] < 20:
+        return None, 'El recorte de fecha es demasiado pequeño.'
+    return roi, metodo
+
+
+def fecha_acta_negativa(rows):
+    """Fecha manuscrita del 'Acta de negativa' ('Siendo las __ horas, del día __/__/__'): control cruzado."""
+    out = set()
+    for l in agrupar_lineas(rows):
+        t = norm(l['text'])
+        if 'deldia' in t or 'siendolas' in t:
+            out.update(dates_in_text(l['text']))
+    return sorted(out)
+
+
+def clasificar_documento(head_text, foot_rows, ancho, alto, exp):
+    """REC completa, REC sin cargo (media página), cargo sin encabezado o anexo (AVISO PREVIO / CEDULÓN)."""
+    cabecera = norm(head_text)
+    es_rec = exp is not None or 'expedientecoactivo' in cabecera or 'ejecucioncoactiva' in cabecera
+    anexo = ('avisoprevio' in cabecera or 'cedulon' in cabecera) and not es_rec
+    roi, _ = localizar_recuadro_fecha(foot_rows, ancho, alto)
+    if anexo:
+        return 'ANEXO'
+    if es_rec and roi:
+        return 'REC'
+    if es_rec:
+        return 'REC_SIN_CARGO'
+    if roi:
+        return 'CARGO_SIN_ENCABEZADO'
+    return 'DESCONOCIDO'
+
+
+def probar_paddle(timeout=600):
+    """Comprueba en un subproceso que PaddleOCR puede inferir; una caída (segfault) no mata el cuaderno."""
+    import subprocess, sys
+    codigo_prueba = (
+        "import numpy as np\n"
+        "from paddleocr import PaddleOCR\n"
+        "o=PaddleOCR(lang='es',ocr_version='PP-OCRv5',device='cpu',use_doc_orientation_classify=False,"
+        "use_doc_unwarping=False,use_textline_orientation=False,enable_mkldnn=False)\n"
+        "im=np.full((96,320,3),255,np.uint8); im[30:60,20:300]=0\n"
+        "list(o.predict(im)); print('PADDLE_OK')\n")
+    try:
+        r = subprocess.run([sys.executable, '-c', codigo_prueba], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, 'tiempo agotado'
+    if r.returncode == 0 and 'PADDLE_OK' in r.stdout:
+        return True, 'ok'
+    motivo = (r.stderr or r.stdout).strip().splitlines()[-1:] or [f'código de salida {r.returncode}']
+    return False, f'código {r.returncode}: {motivo[0][:200]}'
+
+
 class MotorOCR:
-    """PaddleOCR + TrOCR; EasyOCR y DeepSeek local como alternativas."""
-    def __init__(self, motor='paddle_trocr', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
+    """Detector de texto impreso (PaddleOCR o EasyOCR) + TrOCR manuscrito + VLM opcional."""
+    def __init__(self, motor='auto', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
                  paddle_gpu=False, modo_rapido=False, cpu_threads=None, vlm=None, orientacion_auto=False):
         """Carga los modelos una sola vez.
 
-        gpu: usa CUDA para TrOCR y el VLM si está disponible.
+        motor: 'auto' prueba PaddleOCR en un subproceso y, si no puede inferir
+            (p. ej. caída en Python 3.13), usa EasyOCR; 'paddle' o 'easyocr' lo fijan.
+            Se aceptan los nombres antiguos 'paddle_trocr' y 'easyocr'.
+        gpu: usa CUDA para EasyOCR, TrOCR y el VLM si está disponible.
         paddle_gpu: intenta ejecutar PaddleOCR en GPU (requiere paddlepaddle-gpu);
             si falla, vuelve a CPU y lo informa.
-        modo_rapido: detector PP-OCRv5 mobile, varias veces más rápido en CPU
-            con algo menos de precisión en textos pequeños.
+        modo_rapido: detector PP-OCRv5 mobile, varias veces más rápido en CPU.
         cpu_threads: hilos para Paddle en CPU; por defecto todos los del entorno.
         vlm: tercer lector independiente de la fecha manuscrita: 'qwen'
             (Qwen2.5-VL-3B-Instruct, ~7 GB en GPU T4) o None.
-        orientacion_auto: PaddleOCR corrige fotos giradas 90/180/270 grados
-            (más lento; útil si hay fotos en horizontal).
+        orientacion_auto: PaddleOCR corrige fotos giradas 90/180/270 grados.
         """
-        if motor not in ('paddle_trocr','easyocr','deepseek_local'):
-            raise ValueError('Motor desconocido: '+str(motor))
-        if vlm not in (None,'',*MODELOS_VLM):
-            raise ValueError('VLM desconocido: '+str(vlm)+'. Opciones: '+', '.join(MODELOS_VLM))
-        self.paddle=None
-        self.trocr=None
-        self.vlm=None
-        self.opciones=dict(motor=motor,gpu=gpu,trocr_model=trocr_model,paddle_gpu=paddle_gpu,
-                           modo_rapido=modo_rapido,cpu_threads=cpu_threads,vlm=vlm or None,
-                           orientacion_auto=orientacion_auto)
-        if motor=='paddle_trocr':
-            from paddleocr import PaddleOCR
-            import torch
-            from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-            paddle_kwargs=dict(use_doc_orientation_classify=bool(orientacion_auto),use_doc_unwarping=False,
-                use_textline_orientation=False,enable_mkldnn=False,
-                cpu_threads=int(cpu_threads or os.cpu_count() or 2))
-            if modo_rapido:
-                # Al nombrar modelos, PaddleOCR ignora lang/ocr_version: se fijan los dos.
-                # lang='es' equivale a PP-OCRv5_server_det + latin_PP-OCRv5_mobile_rec.
-                paddle_kwargs.update(text_detection_model_name='PP-OCRv5_mobile_det',
-                                     text_recognition_model_name='latin_PP-OCRv5_mobile_rec')
-            else:
-                paddle_kwargs.update(lang='es',ocr_version='PP-OCRv5')
-            self.paddle_device='cpu'
-            if paddle_gpu:
-                try:
-                    import paddle
-                    if not paddle.device.is_compiled_with_cuda():
-                        raise RuntimeError('paddlepaddle instalado sin CUDA')
-                    self.paddle=PaddleOCR(device='gpu',**paddle_kwargs)
-                    self.paddle_device='gpu'
-                except Exception as e:
-                    print('PaddleOCR en GPU no disponible; se usará CPU. Motivo:',str(e)[:200])
-            if self.paddle is None:
-                # CPU para Paddle evita conflictos entre sus bibliotecas CUDA y PyTorch.
-                self.paddle=PaddleOCR(device='cpu',**paddle_kwargs)
-            self.trocr_device='cuda' if gpu and torch.cuda.is_available() else 'cpu'
-            self.processor=TrOCRProcessor.from_pretrained(trocr_model)
-            self.trocr=VisionEncoderDecoderModel.from_pretrained(trocr_model).to(self.trocr_device).eval()
+        motor = {'paddle_trocr': 'paddle'}.get(motor, motor)
+        if motor not in ('auto', 'paddle', 'easyocr'):
+            raise ValueError('Motor desconocido: ' + str(motor) + ". Usa 'auto', 'paddle' o 'easyocr'.")
+        if vlm not in (None, '', *MODELOS_VLM):
+            raise ValueError('VLM desconocido: ' + str(vlm) + '. Opciones: ' + ', '.join(MODELOS_VLM))
+        import torch
+        self.paddle = None; self.reader = None; self.trocr = None; self.vlm = None
+        self.opciones = dict(motor=motor, gpu=gpu, trocr_model=trocr_model, paddle_gpu=paddle_gpu,
+                             modo_rapido=modo_rapido, cpu_threads=cpu_threads, vlm=vlm or None,
+                             orientacion_auto=orientacion_auto)
+        self.gpu = bool(gpu and torch.cuda.is_available())
+        detector = motor
+        if motor == 'auto':
+            ok, motivo = probar_paddle()
+            detector = 'paddle' if ok else 'easyocr'
+            if not ok:
+                print('PaddleOCR no puede inferir en este entorno (' + motivo + '); se usará EasyOCR.')
+        if detector == 'paddle':
+            self._cargar_paddle(paddle_gpu, modo_rapido, cpu_threads, orientacion_auto)
         else:
             import easyocr
-            self.reader = easyocr.Reader(['es','en'],gpu=gpu if motor=='easyocr' else False)
-        self.nombre='EasyOCR local'
-        self.ds_model=None
-        self.ds_tokenizer=None
-        if motor=='paddle_trocr':
-            self.nombre=('PaddleOCR PP-OCRv5'+(' mobile-det' if modo_rapido else '')+' ('+self.paddle_device+') + '
-                         +trocr_model+' ('+self.trocr_device+')')
+            self.reader = easyocr.Reader(['es', 'en'], gpu=self.gpu)
+            self.detector_nombre = 'EasyOCR (' + ('gpu' if self.gpu else 'cpu') + ')'
+        from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+        self.trocr_device = 'cuda' if self.gpu else 'cpu'
+        self.processor = TrOCRProcessor.from_pretrained(trocr_model)
+        self.trocr = VisionEncoderDecoderModel.from_pretrained(trocr_model).to(self.trocr_device).eval()
+        self.nombre = self.detector_nombre + ' + ' + trocr_model + ' (' + self.trocr_device + ')'
         if vlm:
-            self._cargar_vlm(MODELOS_VLM[vlm], gpu)
-            self.nombre+=' + '+MODELOS_VLM[vlm]+' ('+self.vlm_device+')'
-        if motor=='deepseek_local':
-            import torch
-            if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
-                raise RuntimeError('DeepSeek-OCR-2 requiere en esta integración una GPU CUDA con bfloat16 (p. ej. L4/A100). Usa MOTOR="easyocr" para CPU o T4.')
-            from transformers import AutoModel, AutoTokenizer
-            model_name='deepseek-ai/DeepSeek-OCR-2'
-            self.ds_tokenizer=AutoTokenizer.from_pretrained(model_name,trust_remote_code=True)
-            self.ds_model=AutoModel.from_pretrained(model_name,trust_remote_code=True,
-                use_safetensors=True,_attn_implementation='flash_attention_2').eval().cuda().to(torch.bfloat16)
-            self.nombre='EasyOCR (encabezado) + DeepSeek-OCR-2 local (fecha)'
+            self._cargar_vlm(MODELOS_VLM[vlm], self.gpu)
+            self.nombre += ' + ' + MODELOS_VLM[vlm] + ' (' + self.vlm_device + ')'
+
+    def _cargar_paddle(self, paddle_gpu, modo_rapido, cpu_threads, orientacion_auto):
+        from paddleocr import PaddleOCR
+        paddle_kwargs = dict(use_doc_orientation_classify=bool(orientacion_auto), use_doc_unwarping=False,
+                             use_textline_orientation=False, enable_mkldnn=False,
+                             cpu_threads=int(cpu_threads or os.cpu_count() or 2))
+        if modo_rapido:
+            # Al nombrar modelos, PaddleOCR ignora lang/ocr_version: se fijan los dos.
+            # lang='es' equivale a PP-OCRv5_server_det + latin_PP-OCRv5_mobile_rec.
+            paddle_kwargs.update(text_detection_model_name='PP-OCRv5_mobile_det',
+                                 text_recognition_model_name='latin_PP-OCRv5_mobile_rec')
+        else:
+            paddle_kwargs.update(lang='es', ocr_version='PP-OCRv5')
+        self.paddle_device = 'cpu'
+        if paddle_gpu:
+            try:
+                import paddle
+                if not paddle.device.is_compiled_with_cuda():
+                    raise RuntimeError('paddlepaddle instalado sin CUDA')
+                self.paddle = PaddleOCR(device='gpu', **paddle_kwargs)
+                self.paddle_device = 'gpu'
+            except Exception as e:
+                print('PaddleOCR en GPU no disponible; se usará CPU. Motivo:', str(e)[:200])
+        if self.paddle is None:
+            # CPU para Paddle evita conflictos entre sus bibliotecas CUDA y PyTorch.
+            self.paddle = PaddleOCR(device='cpu', **paddle_kwargs)
+        self.detector_nombre = 'PaddleOCR PP-OCRv5' + (' mobile-det' if modo_rapido else '') + ' (' + self.paddle_device + ')'
 
     def _cargar_vlm(self, model_name, gpu):
         """Modelo de visión-lenguaje como lector independiente del recuadro de fecha."""
         import torch
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-        self.vlm_device='cuda' if gpu and torch.cuda.is_available() else 'cpu'
-        dtype=torch.float16 if self.vlm_device=='cuda' else torch.float32
-        self.vlm_processor=AutoProcessor.from_pretrained(model_name, min_pixels=64*28*28, max_pixels=640*28*28)
-        self.vlm=Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name, torch_dtype=dtype).to(self.vlm_device).eval()
-        self.vlm_prompt=('Esta imagen es el recuadro "FECHA DE NOTIFICACIÓN" de un acta. Transcribe únicamente la fecha '
-                         'manuscrita con el formato DD/MM/AAAA. Si falta el día, el mes o el año, o no es legible, '
-                         'responde exactamente ILEGIBLE. No inventes cifras.')
+        self.vlm_device = 'cuda' if gpu and torch.cuda.is_available() else 'cpu'
+        dtype = torch.float16 if self.vlm_device == 'cuda' else torch.float32
+        self.vlm_processor = AutoProcessor.from_pretrained(model_name, min_pixels=64*28*28, max_pixels=640*28*28)
+        self.vlm = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name, torch_dtype=dtype).to(self.vlm_device).eval()
+        self.vlm_prompt = ('Esta imagen es el recuadro "FECHA DE NOTIFICACIÓN" de un acta. Transcribe únicamente la fecha '
+                           'manuscrita con el formato DD/MM/AAAA. Si falta el día, el mes o el año, o no es legible, '
+                           'responde exactamente ILEGIBLE. No inventes cifras.')
 
     def read_vlm(self, im):
         import torch
-        messages=[{'role':'user','content':[{'type':'image'},{'type':'text','text':self.vlm_prompt}]}]
-        text=self.vlm_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs=self.vlm_processor(text=[text], images=[im.convert('RGB')], return_tensors='pt').to(self.vlm_device)
+        messages = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': self.vlm_prompt}]}]
+        text = self.vlm_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.vlm_processor(text=[text], images=[im.convert('RGB')], return_tensors='pt').to(self.vlm_device)
         with torch.inference_mode():
-            out=self.vlm.generate(**inputs, max_new_tokens=16, do_sample=False)
+            out = self.vlm.generate(**inputs, max_new_tokens=16, do_sample=False)
         return self.vlm_processor.batch_decode(out[:, inputs['input_ids'].shape[1]:], skip_special_tokens=True)[0].strip()
 
-    def read(self,im,digits=False):
+    def read(self, im, digits=False):
+        """Detecciones [{'box','text','score'}] en coordenadas de la imagen recibida."""
         import numpy as np
         if self.paddle is not None:
             # Paddle recibe matrices BGR; PIL entrega RGB.
-            output=[]
-            for result in self.paddle.predict(np.array(im.convert('RGB'))[:,:,::-1].copy()):
-                for box,text,score in zip(result['rec_polys'],result['rec_texts'],result['rec_scores']):
-                    output.append({'box':[[float(x),float(y)] for x,y in box],
-                                   'text':str(text),'score':float(score)})
+            output = []
+            for result in self.paddle.predict(np.array(im.convert('RGB'))[:, :, ::-1].copy()):
+                for box, text, score in zip(result['rec_polys'], result['rec_texts'], result['rec_scores']):
+                    output.append({'box': [[float(x), float(y)] for x, y in box],
+                                   'text': str(text), 'score': float(score)})
             return output
-        kwargs={'detail':1,'paragraph':False,'batch_size':1}
-        if digits: kwargs['allowlist']='0123456789/.- '
-        rows=self.reader.readtext(np.array(im.convert('RGB')),**kwargs)
-        return [{'box':[[float(x),float(y)] for x,y in box], 'text':str(text),'score':float(score)} for box,text,score in rows]
+        kwargs = {'detail': 1, 'paragraph': False, 'batch_size': 1}
+        if digits:
+            kwargs['allowlist'] = '0123456789/.- '
+        rows = self.reader.readtext(np.array(im.convert('RGB')), **kwargs)
+        return [{'box': [[float(x), float(y)] for x, y in box], 'text': str(text), 'score': float(score)} for box, text, score in rows]
 
-    def read_handwritten(self,im):
+    def read_handwritten(self, im):
         return self.read_handwritten_lote([im])[0]
 
-    def read_handwritten_lote(self,imagenes):
+    def read_handwritten_lote(self, imagenes):
         """Una sola pasada de TrOCR para varias vistas del mismo recorte."""
         import torch
-        pixels=self.processor(images=[im.convert('RGB') for im in imagenes],return_tensors='pt').pixel_values.to(self.trocr_device)
+        pixels = self.processor(images=[im.convert('RGB') for im in imagenes], return_tensors='pt').pixel_values.to(self.trocr_device)
         with torch.inference_mode():
-            ids=self.trocr.generate(pixels,max_new_tokens=32,num_beams=4,do_sample=False)
-        return [t.strip() for t in self.processor.batch_decode(ids,skip_special_tokens=True)]
+            ids = self.trocr.generate(pixels, max_new_tokens=32, num_beams=4, do_sample=False)
+        return [t.strip() for t in self.processor.batch_decode(ids, skip_special_tokens=True)]
 
-    def leer(self,path):
-        """Lee una fotografía (ruta o archivo en memoria) y propone los campos."""
+    def leer(self, path):
+        """Lee una fotografía (ruta o archivo en memoria) y propone los campos.
+
+        La detección de rótulos se hace sobre una copia reducida (rápida); el recuadro de
+        la fecha se recorta de la imagen a resolución completa para los lectores manuscritos.
+        """
         with Image.open(path) as src:
-            if getattr(src,'n_frames',1)>1:
+            if getattr(src, 'n_frames', 1) > 1:
                 raise ValueError('Imagen de varias páginas: sepárala antes de procesar.')
-            im=ImageOps.exif_transpose(src).convert('RGB')
-        im.thumbnail((2200,2800),Image.Resampling.LANCZOS)
-        w,h=im.size
-        head=self.read(im.crop((0,0,w,int(h*.32))))
-        head_text='\n'.join(r['text'] for r in head)
-        exp,code,res=parse_header(head_text)
-        offset=int(h*.58)
-        foot=self.read(im.crop((0,offset,w,h)))
-        anchors=[r for r in foot if 'fecha' in norm(r['text']) and 'notif' in norm(r['text'])]
-        data=dict(expediente=exp,codigo=code,resolucion=res,fecha_notificacion=None,
-                  fecha_emision=None,fecha_texto=None,observaciones='')
-        evidence={'encabezado':head,'pie':foot,'roi_fecha':None,'variantes_fecha':[],
-                  'motor':self.nombre,'aviso':'Puntuaciones OCR no calibradas; no son probabilidades de acierto.'}
-        if len(anchors)!=1:
-            data['observaciones']='No se localizó un único rótulo FECHA DE NOTIFICACIÓN. Completar manualmente desde la foto.'
-            return data,evidence
-        box=anchors[0]['box']
-        x1=min(x for x,y in box); x2=max(x for x,y in box)
-        y1=min(y for x,y in box)+offset; y2=max(y for x,y in box)+offset
-        lh=max(10,y2-y1)
-        bottom=min(h,y2+max(32,lh*2.6))
-        for r in foot:
-            if 'hora' in norm(r['text']) and 'notif' in norm(r['text']):
-                ry=min(y for x,y in r['box'])+offset
-                if y2<ry<bottom: bottom=ry
-        roi=(max(0,int(x1-25)),max(0,int(y2)),min(w,int(x2+30)),int(bottom))
-        if roi[3]-roi[1]<8:
-            data['observaciones']='El recorte de fecha es demasiado pequeño. Revisar manualmente.'
-            return data,evidence
-        evidence['roi_fecha']=[round(roi[0]/w,6),round(roi[1]/h,6),round(roi[2]/w,6),round(roi[3]/h,6)]
-        crop=im.crop(roi)
-        crop=crop.resize((crop.width*2,crop.height*2),Image.Resampling.LANCZOS)
-        candidates=[]
-        views=[('color',crop),('contraste',ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB'))]
+            original = ImageOps.exif_transpose(src).convert('RGB')
+        W, H = original.size
+        im = original.copy(); im.thumbnail((2200, 2800), Image.Resampling.LANCZOS)
+        w, h = im.size
+        escala = W / w
+        head = self.read(im.crop((0, 0, w, int(h * .32))))
+        head_text = '\n'.join(r['text'] for r in head)
+        exp, code, res = parse_header(head_text)
+        offset = int(h * .50)
+        foot = self.read(im.crop((0, offset, w, h)))
+        foot_abs = [dict(r, box=[[x, y + offset] for x, y in r['box']]) for r in foot]
+        tipo = clasificar_documento(head_text, foot_abs, w, h, exp)
+        data = dict(expediente=exp, codigo=code, resolucion=res, fecha_notificacion=None,
+                    fecha_emision=None, fecha_texto=None, observaciones='')
+        evidence = {'encabezado': head, 'pie': foot_abs, 'roi_fecha': None, 'variantes_fecha': [], 'tipo': tipo,
+                    'orientacion': 'horizontal' if W > H else 'vertical', 'tamano': [W, H],
+                    'motor': self.nombre, 'aviso': 'Puntuaciones OCR no calibradas; no son probabilidades de acierto.'}
+        if tipo == 'ANEXO':
+            data['observaciones'] = 'Documento anexo (AVISO PREVIO / CEDULÓN): no aporta fecha de notificación para F.'
+            evidence['confianza'] = 'SIN_FECHA'; evidence['lectores_coinciden'] = []
+            return data, evidence
+        roi_s, metodo = localizar_recuadro_fecha(foot_abs, w, h)
+        evidence['metodo_recuadro'] = metodo
+        if roi_s is None:
+            data['observaciones'] = metodo + (' Media página sin cargo: la fecha está en otra foto.' if tipo == 'REC_SIN_CARGO' else ' Completar manualmente desde la foto.')
+            evidence['confianza'] = 'SIN_FECHA'; evidence['lectores_coinciden'] = []
+            return data, evidence
+        roi = tuple(int(v * escala) for v in roi_s)
+        evidence['roi_fecha'] = [round(roi[0] / W, 6), round(roi[1] / H, 6), round(roi[2] / W, 6), round(roi[3] / H, 6)]
+        crop = original.crop(roi)
+        if crop.height < 120:
+            factor = max(2, int(120 / max(1, crop.height)) + 1)
+            crop = crop.resize((crop.width * factor, crop.height * factor), Image.Resampling.LANCZOS)
+        candidates = []
+        views = [('color', crop), ('contraste', ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB'))]
         # Tinta azul aislada: elimina el rótulo impreso y las líneas de la tabla, que confunden a TrOCR.
-        tinta,fraccion=vista_tinta(crop)
-        evidence['tinta_azul']=round(fraccion,5)
+        tinta, fraccion = vista_tinta(crop)
+        evidence['tinta_azul'] = round(fraccion, 5)
         if tinta is not None:
-            views.append(('tinta',tinta))
-        for label,view in views:
-            rows=self.read(view,digits=True)
-            text=' '.join(r['text'] for r in sorted(rows,key=lambda r:min(x for x,y in r['box'])))
-            ds=dates_in_text(text)
-            evidence['variantes_fecha'].append({'vista':label,'texto':text,'fechas':ds,'detecciones':rows})
+            views.append(('tinta', tinta))
+        for label, view in views:
+            rows = self.read(view, digits=True)
+            text = ' '.join(r['text'] for r in sorted(rows, key=lambda r: min(x for x, y in r['box'])))
+            ds = dates_in_text(text)
+            evidence['variantes_fecha'].append({'vista': label, 'texto': text, 'fechas': ds, 'detecciones': rows})
             candidates.append(ds)
         if self.trocr is not None:
-            for (label,_),handwritten in zip(views,self.read_handwritten_lote([v for _,v in views])):
-                hd=dates_in_text(handwritten)
-                evidence['variantes_fecha'].append({'vista':'trocr_'+label,'texto':handwritten,'fechas':hd})
+            for (label, _), handwritten in zip(views, self.read_handwritten_lote([v for _, v in views])):
+                hd = dates_in_text(handwritten)
+                evidence['variantes_fecha'].append({'vista': 'trocr_' + label, 'texto': handwritten, 'fechas': hd})
                 candidates.append(hd)
-        if self.ds_model is not None:
-            import tempfile, contextlib
-            with tempfile.TemporaryDirectory() as td:
-                image_path=Path(td)/'fecha.jpg'; crop.save(image_path)
-                # eval_mode retorna el texto; no crea dibujos ni ejecuta el parser de grounding.
-                with contextlib.redirect_stdout(io.StringIO()):
-                    result=self.ds_model.infer(self.ds_tokenizer,prompt='<image>\nFree OCR.',
-                        image_file=str(image_path),output_path=td,base_size=1024,image_size=768,
-                        crop_mode=True,save_results=False,eval_mode=True)
-                text=result if isinstance(result,str) else ''
-                ds=dates_in_text(text)
-                evidence['variantes_fecha'].append({'vista':'deepseek_local','texto':text,'fechas':ds})
-                candidates.append(ds)
         if self.vlm is not None:
-            for label,view in [('vlm_color',crop)]+([('vlm_tinta',tinta)] if tinta is not None else []):
+            for label, view in [('vlm_color', crop)] + ([('vlm_tinta', tinta)] if tinta is not None else []):
                 try:
-                    respuesta=self.read_vlm(view)
+                    respuesta = self.read_vlm(view)
                 except Exception as e:
-                    respuesta='ERROR: '+str(e)[:120]
-                vd=[] if 'ILEGIBLE' in respuesta.upper() else dates_in_text(respuesta)
-                evidence['variantes_fecha'].append({'vista':label,'texto':respuesta,'fechas':vd})
+                    respuesta = 'ERROR: ' + str(e)[:120]
+                vd = [] if 'ILEGIBLE' in respuesta.upper() else dates_in_text(respuesta)
+                evidence['variantes_fecha'].append({'vista': label, 'texto': respuesta, 'fechas': vd})
                 candidates.append(vd)
-        nonempty={x for seq in candidates for x in seq}
+        # Control cruzado: en NEGATIVA la misma fecha se escribe también en el acta ('del día __/__/__').
+        acta = fecha_acta_negativa(foot_abs)
+        if acta:
+            evidence['variantes_fecha'].append({'vista': 'acta_negativa', 'texto': 'fecha del acta de negativa', 'fechas': acta})
+            candidates.append(acta)
+        nonempty = {x for seq in candidates for x in seq}
         # Una lectura es una propuesta; todas requieren confirmación visual.
-        if len(nonempty)==1:
-            data['fecha_notificacion']=next(iter(nonempty))
-            data['fecha_texto']=' | '.join(v['texto'] for v in evidence['variantes_fecha'])
-            data['observaciones']='Fecha propuesta por OCR. Cotejar visualmente; la coincidencia entre lectores no garantiza exactitud.'
-        elif len(nonempty)>1:
-            data['observaciones']='Lecturas de fecha contradictorias: '+', '.join(sorted(nonempty))
+        if len(nonempty) == 1:
+            data['fecha_notificacion'] = next(iter(nonempty))
+            data['fecha_texto'] = ' | '.join(v['texto'] for v in evidence['variantes_fecha'])
+            data['observaciones'] = 'Fecha propuesta por OCR. Cotejar visualmente; la coincidencia entre lectores no garantiza exactitud.'
+        elif len(nonempty) > 1:
+            data['observaciones'] = 'Lecturas de fecha contradictorias: ' + ', '.join(sorted(nonempty))
         else:
-            data['observaciones']='El OCR no obtuvo una fecha completa. Introducirla desde el recorte; no se adivina el año.'
-        nivel,coinciden=nivel_confianza(evidence['variantes_fecha'],data['fecha_notificacion'])
-        evidence['confianza']=nivel; evidence['lectores_coinciden']=coinciden
-        return data,evidence
-
+            data['observaciones'] = 'El OCR no obtuvo una fecha completa. Introducirla desde el recorte; no se adivina el año.'
+        nivel, coinciden = nivel_confianza(evidence['variantes_fecha'], data['fecha_notificacion'])
+        evidence['confianza'] = nivel; evidence['lectores_coinciden'] = coinciden
+        return data, evidence
 
 class Proyecto:
     def __init__(self, fotos, excel, salida, hojas=None):
@@ -704,9 +830,10 @@ class Proyecto:
                 if r.get('lectura') is not None:
                     r.setdefault('historial_ocr',[]).append({k:r.get(k) for k in
                         ('lectura','evidencia_ocr','motor','leido_en','estado')})
-                r.update(lectura=d,estado='POR_REVISAR',destino=target,problemas=issues,
-                         evidencia_ocr=evidence,motor=motor.nombre,leido_en=ahora(),error=None,
-                         confianza=evidence.get('confianza','SIN_FECHA'),alertas=alertas(d,target))
+                tipo=evidence.get('tipo','REC')
+                r.update(lectura=d,estado='ANEXO' if tipo=='ANEXO' else 'POR_REVISAR',destino=target,problemas=issues,
+                         evidencia_ocr=evidence,motor=motor.nombre,leido_en=ahora(),error=None,tipo=tipo,
+                         confianza=evidence.get('confianza','SIN_FECHA'),alertas=alertas(d,target),pareja=None)
                 self.save(r)
                 resumen['discrepancias' if issues else 'confirmar']+=1
             except KeyboardInterrupt:
@@ -727,6 +854,7 @@ class Proyecto:
                 if tqdm is not None and hasattr(barra,'set_postfix'):
                     barra.set_postfix(ok=resumen['confirmar'],rev=resumen['discrepancias'],err=resumen['errores'],refresh=False)
         resumen['segundos']=round(time.monotonic()-inicio,1)
+        resumen['emparejadas']=self.emparejar()
         if resumen['procesadas']:
             por_foto=resumen['segundos']/resumen['procesadas']
             restantes=len(self.pendientes(reintentar_errores))
@@ -734,6 +862,89 @@ class Proyecto:
                   f"Pendientes: {restantes}; estimado {restantes*por_foto/3600:.1f} h a este ritmo.")
         self.estado()
         return resumen
+
+    @staticmethod
+    def _orden_natural(nombre):
+        return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', nombre)]
+
+    def emparejar(self, distancia=2):
+        """Une medias páginas: un cargo sin encabezado toma expediente y código de la REC
+        sin cargo inmediatamente anterior en la misma carpeta (orden natural de nombres).
+        El emparejamiento es una propuesta que el revisor confirma viendo ambas fotos.
+        """
+        por_carpeta=defaultdict(list)
+        for k in getattr(self,'active',self.records):
+            r=self.records[k]
+            if r.get('tipo') in ('REC_SIN_CARGO','CARGO_SIN_ENCABEZADO'):
+                for nombre in r['archivos']:
+                    por_carpeta[posixpath.dirname(nombre)].append((self._orden_natural(posixpath.basename(nombre)),nombre,k))
+        nuevas=0
+        for carpeta,items in por_carpeta.items():
+            items.sort()
+            for i,(_,nombre,k) in enumerate(items):
+                r=self.records[k]
+                if r.get('tipo')!='CARGO_SIN_ENCABEZADO' or r.get('pareja') or r['estado']!='POR_REVISAR':
+                    continue
+                for j in range(i-1,max(-1,i-1-distancia),-1):
+                    _,nombre_prev,kp=items[j]
+                    rp=self.records[kp]
+                    if rp.get('tipo')=='REC_SIN_CARGO' and not rp.get('pareja'):
+                        d=dict(r.get('lectura') or {}); lp=rp.get('lectura') or {}
+                        d.update(expediente=lp.get('expediente'),codigo=lp.get('codigo'),resolucion=lp.get('resolucion'))
+                        d['observaciones']=(f'Expediente y código tomados de la media página {nombre_prev}. '
+                                            'Confirma que ambas fotos son el mismo documento. '+(d.get('observaciones') or ''))
+                        target,issues=evaluar(d,self.index)
+                        r.update(lectura=d,destino=target,problemas=issues,pareja=kp,alertas=alertas(d,target))
+                        rp.update(pareja=k,problemas=[f'Media página sin cargo; su fecha se toma de {nombre}.'])
+                        self.save(r); self.save(rp); nuevas+=1
+                        break
+        if nuevas:
+            print(f'Medias páginas emparejadas: {nuevas}. Confírmalas en la revisión viendo ambas fotos.')
+        return nuevas
+
+    def resumen_alcance(self):
+        """Filas de la hoja dentro del alcance (E = fecha de emisión) con F vacía y con F llena."""
+        vacias=llenas=0
+        for items in self.index.values():
+            for r in items:
+                if r['hoja']==HOJA and fecha(r['emision'])==FECHA_EMISION:
+                    if r['fecha_actual'] in (None,''): vacias+=1
+                    else: llenas+=1
+        print(f'Hoja {HOJA}, E = {FECHA_EMISION:%d/%m/%Y}: {vacias+llenas} filas; F vacía: {vacias}; F ya registrada: {llenas}.')
+        return {'filas':vacias+llenas,'f_vacia':vacias,'f_registrada':llenas}
+
+    def medir_acierto(self, ids=None):
+        """Compara la fecha propuesta por el OCR con la columna F ya registrada en el Excel.
+
+        Solo usa fotos cuyo expediente coincide con una fila que ya tiene F: son el patrón
+        de referencia para estimar el acierto real antes del lote completo.
+        """
+        ids=list(ids) if ids is not None else sorted(getattr(self,'active',self.records))
+        res={'con_referencia':0,'aciertos':0,'errores':0,'sin_fecha_ocr':0,'detalle':[]}
+        for k in ids:
+            r=self.records[k]; d=r.get('lectura') or {}
+            parsed=expediente(d.get('expediente'))
+            if not parsed or parsed[1] is None: continue
+            matches=self.index.get(parsed,[])
+            if len(matches)!=1 or matches[0]['fecha_actual'] in (None,''): continue
+            ref=fecha(matches[0]['fecha_actual']); ocr=fecha(d.get('fecha_notificacion'))
+            res['con_referencia']+=1
+            if ocr is None: res['sin_fecha_ocr']+=1; estado='SIN_FECHA'
+            elif ocr==ref: res['aciertos']+=1; estado='ACIERTO'
+            else: res['errores']+=1; estado='ERROR'
+            res['detalle'].append({'archivo':r['archivos'][0],'excel':ref.isoformat() if ref else None,
+                                   'ocr':ocr.isoformat() if ocr else None,'confianza':r.get('confianza'),'resultado':estado})
+        n=res['con_referencia']
+        if n:
+            print(f"Fotos con fecha de referencia en el Excel: {n}. Aciertos: {res['aciertos']} ({100*res['aciertos']/n:.0f}%). "
+                  f"Errores: {res['errores']}. Sin fecha OCR: {res['sin_fecha_ocr']}.")
+            por_conf=Counter((x['confianza'],x['resultado']) for x in res['detalle'])
+            for (conf,est),c in sorted(por_conf.items()): print(f'  {conf or "-"}: {est} = {c}')
+            for x in res['detalle']:
+                if x['resultado']=='ERROR': print('  ERROR', x['archivo'], 'Excel', x['excel'], 'OCR', x['ocr'])
+        else:
+            print('Ninguna foto de la muestra corresponde a una fila con F ya registrada; amplía la muestra.')
+        return res
 
     def aprobar(self,rid,data,revisor):
         if not revisor.strip():
@@ -799,7 +1010,7 @@ class Proyecto:
         """Identificadores a revisar: 'pendientes', 'segunda' (aprobados por un solo revisor) o 'todos'."""
         ids = sorted(getattr(self,'active',self.records), key=lambda k:(self.records[k]['archivos'][0]))
         estados = {'pendientes':{'POR_REVISAR','PENDIENTE','ERROR'},'segunda':{'APROBADO'},
-                   'todos':{'POR_REVISAR','PENDIENTE','ERROR','APROBADO'}}[modo]
+                   'todos':{'POR_REVISAR','PENDIENTE','ERROR','APROBADO','ANEXO'}}[modo]
         ids = [k for k in ids if self.records[k]['estado'] in estados]
         if modo == 'segunda':
             ids = [k for k in ids if len({a['revisor'] for a in self.aprobaciones_vigentes(self.records[k])}) < 2]
@@ -822,7 +1033,7 @@ class Proyecto:
         def etiqueta(k):
             r=self.records[k]
             revisores=sorted({a['revisor'] for a in self.aprobaciones_vigentes(r)})
-            return f'{r["estado"]} | {r.get("confianza") or "-"} | {r["archivos"][0]}'+(f' | revisado por {", ".join(revisores)}' if revisores else '')
+            return f'{r["estado"]} | {r.get("confianza") or "-"} | {r.get("tipo") or "-"} | {r["archivos"][0]}'+(f' | revisado por {", ".join(revisores)}' if revisores else '')
         choice = W.Dropdown(options=[(etiqueta(k),k) for k in ids],layout=W.Layout(width='98%'))
         output, msg = W.Output(), W.Output()
         exp = W.Text(description='Expediente:',layout=W.Layout(width='98%'),style={'description_width':'140px'})
@@ -861,6 +1072,12 @@ class Proyecto:
                         print('Solo la tinta azul (manuscrito aislado):'); display(tinta)
                 if full.value:
                     im.thumbnail((1100,1700)); display(im)
+                if r.get('pareja') and r['pareja'] in self.records:
+                    rp=self.records[r['pareja']]
+                    print('Media página emparejada:',rp['archivos'][0])
+                    with Image.open(self.path(rp)) as src2:
+                        im2=ImageOps.exif_transpose(src2).convert('RGB')
+                    im2.thumbnail((1100,900)); display(im2)
                 data = r.get('aprobacion',{}).get('datos') if r.get('aprobacion') else r.get('lectura')
                 if data:
                     target,issues = evaluar(data,self.index)
@@ -941,7 +1158,7 @@ class Proyecto:
                      'expediente':d.get('expediente'),'codigo':d.get('codigo'),'fecha':d.get('fecha_notificacion'),
                      'hoja':target['hoja'] if target else '', 'celda':target['celda'] if target else '',
                      'revisor':' | '.join(revisores), 'revisiones':len(revisores),
-                     'aprobado_en':a['fecha'] if a else '', 'confianza_ocr':r.get('confianza') or '',
+                     'aprobado_en':a['fecha'] if a else '', 'confianza_ocr':r.get('confianza') or '','tipo':r.get('tipo') or '',
                      'lectura_ocr':(r.get('lectura') or {}).get('fecha_notificacion') or '',
                      'alertas':' | '.join(alertas(d,target)),
                      'evidencia':' | '.join(sorted((a.get('evidencia') or {}).values())) if a else '',
@@ -968,7 +1185,7 @@ class Proyecto:
             for _,entry in items: entry['resultado']='INCLUIDO'
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
         report_path = self.salida/f'revision_{stamp}.csv'
-        columns = ['id','archivos','estado','expediente','codigo','fecha','hoja','celda','revisor','revisiones','aprobado_en',
+        columns = ['id','archivos','estado','tipo','expediente','codigo','fecha','hoja','celda','revisor','revisiones','aprobado_en',
                    'confianza_ocr','lectura_ocr','alertas','evidencia','resultado','detalle']
         def safe(v):
             s = str(v if v is not None else '')

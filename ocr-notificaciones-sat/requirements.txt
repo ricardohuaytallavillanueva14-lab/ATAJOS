@@ -2,6 +2,7 @@
 # Colab ya trae torch con CUDA; los rangos evitan reinstalarlo.
 paddlepaddle==3.2.0
 paddleocr==3.3.2
+easyocr>=1.7,<2
 transformers==4.57.6
 torch>=2.6,<3
 torchvision

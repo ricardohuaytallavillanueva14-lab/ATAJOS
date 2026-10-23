@@ -32,6 +32,7 @@ if EXCEL_SHA_ESPERADO and sha256(EXCEL) != EXCEL_SHA_ESPERADO:
 print('Excel:', EXCEL, '| SHA-256:', sha256(EXCEL)[:16] + '…')
 proyecto = Proyecto(RUTA_FOTOS, EXCEL, RUTA_RESULTADOS, hojas=(HOJA,))
 print(f'Filtro fijo: hoja {HOJA}; E = {FECHA_EMISION:%d/%m/%Y}; destino F vacía.')
+proyecto.resumen_alcance()
 print('Inventariando las imágenes. La primera vez lee todo el contenido; después reutiliza la caché.')
 proyecto.inventario(rehash=REHACER_INVENTARIO)
 print('PROYECTO LISTO. Ejecuta la celda 3 (prueba con muestra) o directamente la 4.')
