@@ -5,7 +5,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from src import ocr_sat as c
 from openpyxl import Workbook, load_workbook
 from lxml import etree as ET
-from PIL import Image
+from PIL import Image, ImageDraw
 
 def libro_ficticio(path):
     wb=Workbook(); ws=wb.active; ws.title='2026'
@@ -90,7 +90,7 @@ class MotorFalso:
         return dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',fecha_notificacion='15/09/2026',
                     fecha_emision='02/09/2026',fecha_texto=None,observaciones=''),{'motor':self.nombre}
 
-class ProyectoTests(unittest.TestCase):
+class ProyectoBase(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         base=Path(self.temp.name)
@@ -104,6 +104,8 @@ class ProyectoTests(unittest.TestCase):
     def proyecto(self):
         with contextlib.redirect_stdout(io.StringIO()):
             return c.Proyecto(self.fotos,self.excel,self.salida)
+
+class ProyectoTests(ProyectoBase):
     def test_inventory_cache_and_resume(self):
         p=self.proyecto()
         llamadas=[]
@@ -161,6 +163,95 @@ class ProyectoTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             p.ids_de([self.fotos/'no_existe.png'])
 
+class FiabilidadTests(unittest.TestCase):
+    def test_vista_tinta_aisla_azul(self):
+        im=Image.new('RGB',(200,60),'white'); dr=ImageDraw.Draw(im)
+        dr.line((0,55,200,55),fill='black',width=3)            # línea impresa
+        dr.text((5,5),'FECHA DE NOTIFICACION',fill='black')    # rótulo impreso
+        dr.rectangle((120,15,160,40),fill=(40,60,200))         # trazo de bolígrafo azul
+        tinta,fraccion=c.vista_tinta(im)
+        self.assertIsNotNone(tinta); self.assertGreater(fraccion,0.05)
+        px=tinta.load()
+        self.assertEqual(px[140,28],(0,0,0))       # tinta conservada
+        self.assertEqual(px[100,55],(255,255,255)) # línea negra eliminada
+        self.assertEqual(px[10,8],(255,255,255))   # texto impreso eliminado
+        sin,fr=c.vista_tinta(Image.new('RGB',(50,50),'white'))
+        self.assertIsNone(sin); self.assertEqual(fr,0.0)
+    def test_dates_in_text(self):
+        self.assertEqual(c.dates_in_text('15 /09 /2026'),['2026-09-15'])
+        self.assertEqual(c.dates_in_text('15 09  2026'),['2026-09-15'])
+        self.assertEqual(c.dates_in_text('15092026'),['2026-09-15'])
+        self.assertEqual(c.dates_in_text('15-9-2026 y 03/06/2026'),['2026-06-03','2026-09-15'])
+        self.assertEqual(c.dates_in_text('31022026'),[])
+        self.assertEqual(c.dates_in_text('N 15 021 000021666'),[])
+    def test_nivel_confianza(self):
+        v=lambda vista,fechas:{'vista':vista,'fechas':fechas,'texto':''}
+        self.assertEqual(c.nivel_confianza([v('color',['2026-09-15']),v('trocr_color',['2026-09-15'])],'2026-09-15'),('ALTA',['paddle','trocr']))
+        self.assertEqual(c.nivel_confianza([v('color',['2026-09-15']),v('tinta',['2026-09-15']),v('trocr_color',[])],'2026-09-15')[0],'MEDIA')
+        self.assertEqual(c.nivel_confianza([v('color',['2026-09-15']),v('vlm_color',['2026-09-16'])],None)[0],'CONTRADICTORIA')
+        self.assertEqual(c.nivel_confianza([v('color',[]),v('trocr_color',[])],None)[0],'SIN_FECHA')
+    def test_alertas_plausibilidad(self):
+        original=c.VENTANA_DIAS
+        try:
+            c.configurar(ventana_dias=30)
+            t={'emision':'2026-09-02'}
+            self.assertEqual(c.alertas({'fecha_notificacion':'15/09/2026'},t),[])
+            avisos=c.alertas({'fecha_notificacion':'15/12/2026'},t)
+            self.assertEqual(len(avisos),1); self.assertIn('104 días',avisos[0])
+            self.assertTrue(any('domingo' in a for a in c.alertas({'fecha_notificacion':'06/09/2026'},t)))
+            with self.assertRaises(ValueError): c.configurar(ventana_dias=0)
+        finally:
+            c.VENTANA_DIAS=original
+
+class ExportacionLegalTests(ProyectoBase):
+    def preparar(self):
+        p=self.proyecto()
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.inventario(); p.procesar(MotorFalso(),limite=10)
+        return p
+    def datos(self,n=1):
+        return dict(expediente=f'16-012-{n}-2026',codigo='123',resolucion='UNO',fecha_notificacion='15/09/2026',fecha_emision='02/09/2026')
+    def test_aprobaciones_evidencia_y_doble_revision(self):
+        p=self.preparar(); rid=sorted(p.active)[0]
+        p.records[rid]['confianza']='MEDIA'; p.records[rid]['evidencia_ocr']['roi_fecha']=[0.1,0.6,0.9,0.9]
+        p.aprobar(rid,self.datos(),'Ana')
+        r=p.records[rid]
+        self.assertEqual(r['estado'],'APROBADO'); self.assertEqual(len(r['aprobaciones']),1)
+        self.assertEqual(r['aprobacion']['confianza_ocr'],'MEDIA')
+        self.assertTrue((self.salida/'evidencia'/f'{rid}_cargo.jpg').exists())
+        self.assertTrue((self.salida/'evidencia'/f'{rid}_fecha.jpg').exists())
+        with self.assertRaises(ValueError):  # misma persona, mismos datos
+            p.aprobar(rid,self.datos(),'Ana')
+        with contextlib.redirect_stdout(io.StringIO()):
+            xlsx,csv_path=p.exportar(doble_revision='no_alta')
+        self.assertIsNone(xlsx)
+        filas=list(__import__('csv').DictReader(csv_path.open(encoding='utf-8-sig'),delimiter=';'))
+        fila=next(f for f in filas if f['id']==rid)
+        self.assertEqual(fila['resultado'],'FALTA SEGUNDA REVISION'); self.assertEqual(fila['confianza_ocr'],'MEDIA')
+        self.assertIn('_fecha.jpg',fila['evidencia'])
+        p.aprobar(rid,self.datos(),'Luis')
+        self.assertEqual(len({a['revisor'] for a in p.aprobaciones_vigentes(p.records[rid])}),2)
+        self.assertEqual(p.lista_revision('segunda'),[])
+        with contextlib.redirect_stdout(io.StringIO()):
+            xlsx,csv_path=p.exportar(doble_revision='no_alta')
+        self.assertIsNotNone(xlsx)
+        actas=sorted(self.salida.glob('acta_exportacion_*.json'))
+        acta=json.loads(actas[-1].read_text(encoding='utf-8'))
+        self.assertEqual(acta['celdas_escritas'],1); self.assertEqual(acta['excel_generado']['sha256'],c.sha256(xlsx))
+        self.assertEqual(acta['detalle'][0]['celda'],'F2'); self.assertEqual(acta['detalle'][0]['revisor'],'Ana | Luis')
+        # Una corrección posterior invalida las aprobaciones anteriores.
+        corregido=self.datos(); corregido['fecha_notificacion']='16/09/2026'
+        p.aprobar(rid,corregido,'Ana')
+        self.assertEqual(len(p.aprobaciones_vigentes(p.records[rid])),1)
+        self.assertEqual(p.lista_revision('segunda'),[rid])
+        with contextlib.redirect_stdout(io.StringIO()):
+            xlsx,_=p.exportar(doble_revision=True)
+        self.assertIsNone(xlsx)
+        with contextlib.redirect_stdout(io.StringIO()):
+            xlsx,_=p.exportar(doble_revision=False)
+        self.assertIsNotNone(xlsx)
+        self.assertEqual(load_workbook(xlsx)['2026']['F2'].value.date(),date(2026,9,16))
+
 class NotebookTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -181,6 +272,8 @@ class NotebookTests(unittest.TestCase):
             self.assertTrue(source.startswith('# @title '),cell['id'])
         self.assertIn('@param',''.join(cells[0]['source']))
         self.assertIn('def configurar(',''.join(cells[1]['source']))
+        self.assertIn('DOBLE_REVISION',''.join(cells[5]['source']))
+        self.assertIn('LECTOR_VLM',''.join(cells[3]['source']))
     def test_notebook_matches_templates(self):
         nb=json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(nb,self.builder.render(),'Ejecuta python scripts/build_notebook.py y confirma el cuaderno.')

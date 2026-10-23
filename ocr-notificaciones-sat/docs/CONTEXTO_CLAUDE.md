@@ -10,7 +10,9 @@ Supervisa `REC_2026_02_SEPTIEMBRE_Colab.ipynb`. El objetivo es leer las 3.996 fo
 - Configuración: `proyecto.json` (Excel, hoja y fecha de emisión del lote).
 - Caché de huellas: `inventario_cache.json` (tamaño y fecha por foto; `REHACER_INVENTARIO` la ignora).
 - Modelos: `modelos_ocr_cache/` junto a la carpeta de resultados (TrOCR y PaddleOCR).
-- Avance: `registros/*.json` por SHA-256 del contenido fotográfico.
+- Avance: `registros/*.json` por SHA-256 del contenido fotográfico (lecturas de cada lector, confianza, alertas, aprobaciones).
+- Evidencia: `evidencia/<sha256>_fecha.jpg` y `_cargo.jpg` guardados al aprobar.
+- Actas: `acta_exportacion_*.json` con huellas del original y de cada copia generada.
 - Exportaciones: `expedientes_actualizados_*.xlsx` y `revision_*.csv`.
 
 El original esperado es el XLSX adjuntado cuyo nombre termina en `(1).xlsx`. Su SHA-256 se comprueba en la celda 2; abrirlo y volver a guardarlo puede cambiar esa huella aunque sus valores parezcan iguales.
@@ -20,9 +22,9 @@ El original esperado es el XLSX adjuntado cuyo nombre termina en `(1).xlsx`. Su 
 1. Preparación: montaje de Drive, verificación de las fotos (`FOTOS_ESPERADAS`, 0 = sin comprobar) y del inventario XLSX si existe, instalación solo de lo que falta, caché de modelos en Drive.
 2. Proyecto: carga de código, `configurar(HOJA_LOTE, FECHA_EMISION_LOTE)`, Excel desde Drive o subido, índice e inventario (reutiliza la caché de huellas).
 3. Prueba: muestra de `MUESTRA` fotos repartidas por carpetas; informa segundos por foto y horas estimadas.
-4. Procesamiento: PaddleOCR + TrOCR, todos los registros NUEVOS (o hasta `LIMITE`). `REINTENTAR_ERRORES` controla los errores anteriores. Guarda cada lectura y llama al exportador; si ya había aprobaciones recuperadas, puede producir una copia actualizada.
-5. Revisión: muestra imagen y campos; requiere nombre del revisor, cotejo y confirmación.
-6. Exportación: revalida todas las aprobaciones y genera una copia y un CSV.
+4. Procesamiento: PaddleOCR + TrOCR + Qwen2.5-VL (`LECTOR_VLM`) sobre el recuadro de fecha con tinta azul aislada; confianza ALTA/MEDIA/CONTRADICTORIA/SIN_FECHA y alertas. Todos los registros NUEVOS (o hasta `LIMITE`). `REINTENTAR_ERRORES` controla los errores anteriores. Guarda cada lectura y llama al exportador; si ya había aprobaciones recuperadas, puede producir una copia actualizada.
+5. Revisión: muestra imagen, recortes, lecturas y campos; requiere nombre del revisor, cotejo y confirmación. `MODO = segunda` para el segundo revisor; la misma persona no puede firmar dos veces los mismos datos.
+6. Exportación: revalida todas las aprobaciones, aplica `DOBLE_REVISION` (ninguna, no_alta, todas) y genera copia, CSV y acta JSON.
 7. Paquete opcional: hasta `CASOS` pendientes para revisión externa; no los envía automáticamente.
 
 Estados: NUEVO, POR_REVISAR, PENDIENTE, APROBADO, ERROR. POR_REVISAR no es un fallo ni una aprobación. Menos imágenes únicas que archivos es normal si hay duplicados. Ninguna aprobación implica que todavía no hay copia actualizada; sí puede haber informe CSV.

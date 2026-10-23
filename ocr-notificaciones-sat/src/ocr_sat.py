@@ -19,6 +19,10 @@ EXTENSIONES = {'.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.bmp'}
 # evaluación y la escritura del XLSX, de modo que las tres barreras coinciden.
 HOJA = '2026'
 FECHA_EMISION = date(2026, 9, 2)
+# Días tras la emisión dentro de los cuales una notificación se considera habitual.
+# Fuera de la ventana no se bloquea: se marca una alerta para verificar año y mes.
+VENTANA_DIAS = 60
+MODELOS_VLM = {'qwen': 'Qwen/Qwen2.5-VL-3B-Instruct'}
 
 try:
     from tqdm.auto import tqdm
@@ -26,13 +30,18 @@ except ImportError:  # pragma: no cover - tqdm viene instalado en Colab
     tqdm = None
 
 
-def configurar(hoja=None, fecha_emision=None):
+def configurar(hoja=None, fecha_emision=None, ventana_dias=None):
     """Fija la hoja anual y la fecha de emisión REC que delimitan el lote.
 
     Devuelve (hoja, fecha_emision). Una carpeta de resultados queda ligada a
-    esta configuración mediante proyecto.json.
+    esta configuración mediante proyecto.json. ventana_dias ajusta la alerta
+    de plausibilidad (no bloquea).
     """
-    global HOJA, FECHA_EMISION
+    global HOJA, FECHA_EMISION, VENTANA_DIAS
+    if ventana_dias is not None:
+        if int(ventana_dias) < 1:
+            raise ValueError('La ventana de plausibilidad debe ser de al menos un día.')
+        VENTANA_DIAS = int(ventana_dias)
     nueva_hoja = HOJA if hoja is None else str(hoja).strip()
     if not re.fullmatch(r'20\d{2}', nueva_hoja):
         raise ValueError('La hoja debe ser un año de cuatro cifras, por ejemplo 2026.')
@@ -43,6 +52,67 @@ def configurar(hoja=None, fecha_emision=None):
         raise ValueError(f'La fecha de emisión {nueva_fecha:%d/%m/%Y} no pertenece a la hoja {nueva_hoja}.')
     HOJA, FECHA_EMISION = nueva_hoja, nueva_fecha
     return HOJA, FECHA_EMISION
+
+
+def vista_tinta(im, min_fraccion=0.002):
+    """Aísla los trazos de bolígrafo azul (manuscritos) del texto y las líneas impresas en negro.
+
+    Devuelve (imagen RGB con solo la tinta sobre blanco, fracción de píxeles de tinta) o
+    (None, fracción) si casi no hay tinta azul: entonces el manuscrito es negro o no existe.
+    """
+    import numpy as np
+    hsv = np.asarray(im.convert('RGB').convert('HSV'), dtype=np.int16)
+    h, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    # Azul/violeta en la escala 0-255 de PIL: aprox. 130-200. Impresión negra: saturación baja.
+    mascara = (sat > 45) & (val > 25) & (val < 245) & (h >= 120) & (h <= 205)
+    fraccion = float(mascara.mean())
+    if fraccion < min_fraccion:
+        return None, fraccion
+    salida = np.full(hsv.shape, 255, dtype=np.uint8)
+    salida[mascara] = 0
+    return Image.fromarray(salida, 'RGB'), fraccion
+
+
+def familia_lector(vista):
+    """Agrupa las vistas por lector independiente: paddle, trocr, vlm, deepseek."""
+    for prefijo in ('trocr', 'vlm', 'deepseek'):
+        if str(vista).startswith(prefijo):
+            return prefijo
+    return 'paddle'
+
+
+def nivel_confianza(variantes, propuesta):
+    """Clasifica la propuesta de fecha según cuántos lectores independientes coinciden.
+
+    ALTA: dos o más lectores distintos leyeron exactamente la misma fecha y ninguno otra.
+    MEDIA: un solo lector obtuvo la fecha y ninguno la contradice.
+    CONTRADICTORIA: hay lecturas de fechas distintas. SIN_FECHA: nadie leyó una fecha.
+    Ningún nivel sustituye el cotejo visual: solo ordena y documenta la revisión.
+    """
+    por_familia = defaultdict(set)
+    for v in variantes:
+        por_familia[familia_lector(v.get('vista'))].update(v.get('fechas') or [])
+    distintas = {d for ds in por_familia.values() for d in ds}
+    if propuesta is None or not distintas:
+        return 'CONTRADICTORIA' if len(distintas) > 1 else 'SIN_FECHA', []
+    coinciden = sorted(f for f, ds in por_familia.items() if ds == {propuesta})
+    if len(distintas) > 1:
+        return 'CONTRADICTORIA', coinciden
+    return ('ALTA' if len(coinciden) >= 2 else 'MEDIA'), coinciden
+
+
+def alertas(data, target=None):
+    """Avisos de plausibilidad que no bloquean la aprobación pero exigen atención."""
+    avisos = []
+    d = fecha((data or {}).get('fecha_notificacion'))
+    if d is None:
+        return avisos
+    em = fecha(target['emision']) if target else fecha((data or {}).get('fecha_emision'))
+    if em and (d - em).days > VENTANA_DIAS:
+        avisos.append(f'La notificación es {(d - em).days} días posterior a la emisión (ventana habitual: {VENTANA_DIAS}). Verifica mes y año en la foto.')
+    if d.weekday() == 6:
+        avisos.append('La fecha cae en domingo; confirma el día en la foto.')
+    return avisos
 
 
 def _progreso(iterable, total, desc):
@@ -220,7 +290,10 @@ def parse_header(text):
     return exp,code,resolution[0] if len(set(resolution))==1 else None
 
 def dates_in_text(text):
+    """Fechas DD/MM/AAAA completas en el texto; admite separadores variados o cifras seguidas (15092026)."""
     matches = re.findall(r'(?<!\d)(\d{1,2})\s*[/ .-]\s*(\d{1,2})\s*[/ .-]\s*(20\d{2})(?!\d)',text)
+    # Con la tinta aislada las barras finas pueden desaparecer: 8 cifras seguidas DDMMAAAA.
+    matches += re.findall(r'(?<!\d)(\d{2})(\d{2})(20\d{2})(?!\d)',text)
     out = set()
     for day,month,year in matches:
         try: out.add(date(int(year),int(month),int(day)).isoformat())
@@ -262,27 +335,35 @@ def seleccionar_muestra(paths, raiz, cantidad=30, semilla=2026):
 class MotorOCR:
     """PaddleOCR + TrOCR; EasyOCR y DeepSeek local como alternativas."""
     def __init__(self, motor='paddle_trocr', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
-                 paddle_gpu=False, modo_rapido=False, cpu_threads=None):
+                 paddle_gpu=False, modo_rapido=False, cpu_threads=None, vlm=None, orientacion_auto=False):
         """Carga los modelos una sola vez.
 
-        gpu: usa CUDA para TrOCR si está disponible.
+        gpu: usa CUDA para TrOCR y el VLM si está disponible.
         paddle_gpu: intenta ejecutar PaddleOCR en GPU (requiere paddlepaddle-gpu);
             si falla, vuelve a CPU y lo informa.
         modo_rapido: detector PP-OCRv5 mobile, varias veces más rápido en CPU
             con algo menos de precisión en textos pequeños.
         cpu_threads: hilos para Paddle en CPU; por defecto todos los del entorno.
+        vlm: tercer lector independiente de la fecha manuscrita: 'qwen'
+            (Qwen2.5-VL-3B-Instruct, ~7 GB en GPU T4) o None.
+        orientacion_auto: PaddleOCR corrige fotos giradas 90/180/270 grados
+            (más lento; útil si hay fotos en horizontal).
         """
         if motor not in ('paddle_trocr','easyocr','deepseek_local'):
             raise ValueError('Motor desconocido: '+str(motor))
+        if vlm not in (None,'',*MODELOS_VLM):
+            raise ValueError('VLM desconocido: '+str(vlm)+'. Opciones: '+', '.join(MODELOS_VLM))
         self.paddle=None
         self.trocr=None
+        self.vlm=None
         self.opciones=dict(motor=motor,gpu=gpu,trocr_model=trocr_model,paddle_gpu=paddle_gpu,
-                           modo_rapido=modo_rapido,cpu_threads=cpu_threads)
+                           modo_rapido=modo_rapido,cpu_threads=cpu_threads,vlm=vlm or None,
+                           orientacion_auto=orientacion_auto)
         if motor=='paddle_trocr':
             from paddleocr import PaddleOCR
             import torch
             from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-            paddle_kwargs=dict(use_doc_orientation_classify=False,use_doc_unwarping=False,
+            paddle_kwargs=dict(use_doc_orientation_classify=bool(orientacion_auto),use_doc_unwarping=False,
                 use_textline_orientation=False,enable_mkldnn=False,
                 cpu_threads=int(cpu_threads or os.cpu_count() or 2))
             if modo_rapido:
@@ -317,6 +398,9 @@ class MotorOCR:
         if motor=='paddle_trocr':
             self.nombre=('PaddleOCR PP-OCRv5'+(' mobile-det' if modo_rapido else '')+' ('+self.paddle_device+') + '
                          +trocr_model+' ('+self.trocr_device+')')
+        if vlm:
+            self._cargar_vlm(MODELOS_VLM[vlm], gpu)
+            self.nombre+=' + '+MODELOS_VLM[vlm]+' ('+self.vlm_device+')'
         if motor=='deepseek_local':
             import torch
             if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
@@ -327,6 +411,27 @@ class MotorOCR:
             self.ds_model=AutoModel.from_pretrained(model_name,trust_remote_code=True,
                 use_safetensors=True,_attn_implementation='flash_attention_2').eval().cuda().to(torch.bfloat16)
             self.nombre='EasyOCR (encabezado) + DeepSeek-OCR-2 local (fecha)'
+
+    def _cargar_vlm(self, model_name, gpu):
+        """Modelo de visión-lenguaje como lector independiente del recuadro de fecha."""
+        import torch
+        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        self.vlm_device='cuda' if gpu and torch.cuda.is_available() else 'cpu'
+        dtype=torch.float16 if self.vlm_device=='cuda' else torch.float32
+        self.vlm_processor=AutoProcessor.from_pretrained(model_name, min_pixels=64*28*28, max_pixels=640*28*28)
+        self.vlm=Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name, torch_dtype=dtype).to(self.vlm_device).eval()
+        self.vlm_prompt=('Esta imagen es el recuadro "FECHA DE NOTIFICACIÓN" de un acta. Transcribe únicamente la fecha '
+                         'manuscrita con el formato DD/MM/AAAA. Si falta el día, el mes o el año, o no es legible, '
+                         'responde exactamente ILEGIBLE. No inventes cifras.')
+
+    def read_vlm(self, im):
+        import torch
+        messages=[{'role':'user','content':[{'type':'image'},{'type':'text','text':self.vlm_prompt}]}]
+        text=self.vlm_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs=self.vlm_processor(text=[text], images=[im.convert('RGB')], return_tensors='pt').to(self.vlm_device)
+        with torch.inference_mode():
+            out=self.vlm.generate(**inputs, max_new_tokens=16, do_sample=False)
+        return self.vlm_processor.batch_decode(out[:, inputs['input_ids'].shape[1]:], skip_special_tokens=True)[0].strip()
 
     def read(self,im,digits=False):
         import numpy as np
@@ -393,6 +498,11 @@ class MotorOCR:
         crop=crop.resize((crop.width*2,crop.height*2),Image.Resampling.LANCZOS)
         candidates=[]
         views=[('color',crop),('contraste',ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB'))]
+        # Tinta azul aislada: elimina el rótulo impreso y las líneas de la tabla, que confunden a TrOCR.
+        tinta,fraccion=vista_tinta(crop)
+        evidence['tinta_azul']=round(fraccion,5)
+        if tinta is not None:
+            views.append(('tinta',tinta))
         for label,view in views:
             rows=self.read(view,digits=True)
             text=' '.join(r['text'] for r in sorted(rows,key=lambda r:min(x for x,y in r['box'])))
@@ -417,16 +527,27 @@ class MotorOCR:
                 ds=dates_in_text(text)
                 evidence['variantes_fecha'].append({'vista':'deepseek_local','texto':text,'fechas':ds})
                 candidates.append(ds)
+        if self.vlm is not None:
+            for label,view in [('vlm_color',crop)]+([('vlm_tinta',tinta)] if tinta is not None else []):
+                try:
+                    respuesta=self.read_vlm(view)
+                except Exception as e:
+                    respuesta='ERROR: '+str(e)[:120]
+                vd=[] if 'ILEGIBLE' in respuesta.upper() else dates_in_text(respuesta)
+                evidence['variantes_fecha'].append({'vista':label,'texto':respuesta,'fechas':vd})
+                candidates.append(vd)
         nonempty={x for seq in candidates for x in seq}
         # Una lectura es una propuesta; todas requieren confirmación visual.
         if len(nonempty)==1:
             data['fecha_notificacion']=next(iter(nonempty))
             data['fecha_texto']=' | '.join(v['texto'] for v in evidence['variantes_fecha'])
-            data['observaciones']='Fecha propuesta por OCR. Cotejar visualmente; la coincidencia entre variantes no garantiza exactitud.'
+            data['observaciones']='Fecha propuesta por OCR. Cotejar visualmente; la coincidencia entre lectores no garantiza exactitud.'
         elif len(nonempty)>1:
             data['observaciones']='Lecturas de fecha contradictorias: '+', '.join(sorted(nonempty))
         else:
             data['observaciones']='El OCR no obtuvo una fecha completa. Introducirla desde el recorte; no se adivina el año.'
+        nivel,coinciden=nivel_confianza(evidence['variantes_fecha'],data['fecha_notificacion'])
+        evidence['confianza']=nivel; evidence['lectores_coinciden']=coinciden
         return data,evidence
 
 
@@ -584,7 +705,8 @@ class Proyecto:
                     r.setdefault('historial_ocr',[]).append({k:r.get(k) for k in
                         ('lectura','evidencia_ocr','motor','leido_en','estado')})
                 r.update(lectura=d,estado='POR_REVISAR',destino=target,problemas=issues,
-                         evidencia_ocr=evidence,motor=motor.nombre,leido_en=ahora(),error=None)
+                         evidencia_ocr=evidence,motor=motor.nombre,leido_en=ahora(),error=None,
+                         confianza=evidence.get('confianza','SIN_FECHA'),alertas=alertas(d,target))
                 self.save(r)
                 resumen['discrepancias' if issues else 'confirmar']+=1
             except KeyboardInterrupt:
@@ -627,10 +749,43 @@ class Proyecto:
             raise ValueError('Falta el destino.')
         previous = r.get('aprobacion')
         if previous:
+            mismos = all((previous.get('datos') or {}).get(f)==data.get(f) for f in ('expediente','codigo','resolucion','fecha_notificacion'))
+            if mismos and any(a['revisor']==revisor.strip() for a in self.aprobaciones_vigentes(r)):
+                raise ValueError('Este revisor ya confirmó estos mismos datos. La segunda revisión debe hacerla otra persona.')
             r.setdefault('historial_aprobaciones',[]).append(previous)
-        r['aprobacion'] = {'datos':data,'destino':target,'revisor':revisor.strip(),'fecha':ahora()}
+        entrada = {'datos':data,'destino':target,'revisor':revisor.strip(),'fecha':ahora(),
+                   'confianza_ocr':r.get('confianza'),'alertas':alertas(data,target),
+                   'lectura_ocr':(r.get('lectura') or {}).get('fecha_notificacion'),
+                   'evidencia':self.guardar_evidencia(r)}
+        r.setdefault('aprobaciones',[]).append(entrada)
+        r['aprobacion'] = entrada
         r['estado'] = 'APROBADO'
         self.save(r)
+
+    def aprobaciones_vigentes(self, r):
+        """Aprobaciones cuyos datos coinciden con la última (una corrección posterior las invalida)."""
+        ultima = r.get('aprobacion')
+        if not ultima:
+            return []
+        clave = lambda a: tuple((a.get('datos') or {}).get(k) for k in ('expediente','codigo','resolucion','fecha_notificacion'))
+        return [a for a in r.get('aprobaciones') or [ultima] if clave(a) == clave(ultima)]
+
+    def guardar_evidencia(self, r):
+        """Guarda en Drive el cargo y el recorte de fecha que vio el revisor, nombrados por la huella de la foto."""
+        carpeta = self.salida/'evidencia'
+        carpeta.mkdir(exist_ok=True)
+        rutas = {}
+        with Image.open(self.path(r)) as src:
+            im = ImageOps.exif_transpose(src).convert('RGB')
+        w,h = im.size
+        cargo = im.crop((0,int(h*.58),w,h)); cargo.thumbnail((1600,1600))
+        destino = carpeta/f"{r['id']}_cargo.jpg"; cargo.save(destino,'JPEG',quality=90); rutas['cargo']=destino.name
+        roi = (r.get('evidencia_ocr') or {}).get('roi_fecha')
+        if roi:
+            rec = im.crop((int(roi[0]*w),int(roi[1]*h),int(roi[2]*w),int(roi[3]*h)))
+            rec = rec.resize((rec.width*2,rec.height*2),Image.Resampling.LANCZOS)
+            destino = carpeta/f"{r['id']}_fecha.jpg"; rec.save(destino,'JPEG',quality=95); rutas['fecha']=destino.name
+        return rutas
 
     def revision_manual(self, limite=100):
         """Permite trabajar aun sin modelos descargados ni OCR disponible."""
@@ -640,20 +795,35 @@ class Proyecto:
             self.save(r)
         print(f'{len(pending)} fotografías preparadas para transcripción visual.')
 
-    def revisar(self):
+    def lista_revision(self, modo='pendientes'):
+        """Identificadores a revisar: 'pendientes', 'segunda' (aprobados por un solo revisor) o 'todos'."""
+        ids = sorted(getattr(self,'active',self.records), key=lambda k:(self.records[k]['archivos'][0]))
+        estados = {'pendientes':{'POR_REVISAR','PENDIENTE','ERROR'},'segunda':{'APROBADO'},
+                   'todos':{'POR_REVISAR','PENDIENTE','ERROR','APROBADO'}}[modo]
+        ids = [k for k in ids if self.records[k]['estado'] in estados]
+        if modo == 'segunda':
+            ids = [k for k in ids if len({a['revisor'] for a in self.aprobaciones_vigentes(self.records[k])}) < 2]
+        orden = {'ALTA':0,'MEDIA':1,'CONTRADICTORIA':2,'SIN_FECHA':3}
+        def prioridad(k):
+            r=self.records[k]; d=r.get('lectura') or {}
+            t,_=evaluar(d,self.index)
+            en_alcance = 0 if t and fecha(t['emision'])==FECHA_EMISION and t['fecha_actual'] in (None,'') else 1
+            return (en_alcance, orden.get(r.get('confianza'),3))
+        ids.sort(key=prioridad)
+        return ids
+
+    def revisar(self, modo='pendientes'):
         import ipywidgets as W
         from IPython.display import display, clear_output
-        ids = sorted(getattr(self,'active',self.records), key=lambda k:(self.records[k]['archivos'][0]))
-        ids = [k for k in ids if self.records[k]['estado'] in {'POR_REVISAR','PENDIENTE','ERROR'}]
-        def prioridad(k):
-            d=self.records[k].get('lectura') or {}
-            t,_=evaluar(d,self.index)
-            return 0 if t and fecha(t['emision'])==FECHA_EMISION and t['fecha_actual'] in (None,'') else 1
-        ids.sort(key=prioridad)
+        ids = self.lista_revision(modo)
         if not ids:
-            print('Todavía no hay lecturas. Ejecuta el procesamiento primero.')
+            print('No hay registros para este modo. Ejecuta el procesamiento o cambia el modo de revisión.')
             return
-        choice = W.Dropdown(options=[(f'{self.records[k]["estado"]} | {self.records[k]["archivos"][0]}',k) for k in ids],layout=W.Layout(width='98%'))
+        def etiqueta(k):
+            r=self.records[k]
+            revisores=sorted({a['revisor'] for a in self.aprobaciones_vigentes(r)})
+            return f'{r["estado"]} | {r.get("confianza") or "-"} | {r["archivos"][0]}'+(f' | revisado por {", ".join(revisores)}' if revisores else '')
+        choice = W.Dropdown(options=[(etiqueta(k),k) for k in ids],layout=W.Layout(width='98%'))
         output, msg = W.Output(), W.Output()
         exp = W.Text(description='Expediente:',layout=W.Layout(width='98%'),style={'description_width':'140px'})
         code = W.Text(description='Código:',style={'description_width':'140px'})
@@ -679,21 +849,31 @@ class Proyecto:
                     print(title)
                     view.thumbnail((1100,1000))
                     display(view)
-                roi=r.get('evidencia_ocr',{}).get('roi_fecha')
+                roi=(r.get('evidencia_ocr') or {}).get('roi_fecha')
                 if roi and angle[0]==0:
                     crop=im.crop((int(roi[0]*w),int(roi[1]*h),int(roi[2]*w),int(roi[3]*h)))
                     crop=crop.resize((crop.width*2,crop.height*2),Image.Resampling.LANCZOS)
                     crop.thumbnail((1100,350))
                     print('Recorte que leyó el OCR: comprueba que contenga la fecha correcta.')
                     display(crop)
+                    tinta,_=vista_tinta(crop)
+                    if tinta is not None:
+                        print('Solo la tinta azul (manuscrito aislado):'); display(tinta)
                 if full.value:
                     im.thumbnail((1100,1700)); display(im)
                 data = r.get('aprobacion',{}).get('datos') if r.get('aprobacion') else r.get('lectura')
                 if data:
                     target,issues = evaluar(data,self.index)
                     print('Destino:',target)
+                    print('Confianza OCR:',r.get('confianza') or '-','| lectores que coinciden:',', '.join((r.get('evidencia_ocr') or {}).get('lectores_coinciden') or []) or 'ninguno')
+                    for v in (r.get('evidencia_ocr') or {}).get('variantes_fecha') or []:
+                        print(f"  {v['vista']:<12} -> {', '.join(v.get('fechas') or []) or 'sin fecha'} | texto: {str(v.get('texto'))[:60]}")
                     print('Observaciones de lectura:',data.get('observaciones') or 'Ninguna')
                     print('Comprobaciones:',issues or 'Coinciden; falta tu comprobación visual.')
+                    for aviso in alertas(data,target): print('ALERTA:',aviso)
+                    vigentes=self.aprobaciones_vigentes(r)
+                    if vigentes:
+                        print('Aprobaciones vigentes:',', '.join(f"{a['revisor']} ({a['fecha']})" for a in vigentes))
                 elif r.get('error'):
                     print('Error:',r['error'])
         def load(change=None):
@@ -719,7 +899,8 @@ class Proyecto:
                     d.update(expediente=exp.value,codigo=code.value,resolucion=res.value,
                              fecha_notificacion=dt.value,fecha_emision=em.value)
                     self.aprobar(choice.value,d,who.value)
-                    print('Confirmado y guardado. Pulsa Siguiente para continuar.')
+                    n=len({a['revisor'] for a in self.aprobaciones_vigentes(self.records[choice.value])})
+                    print(f'Confirmado y guardado ({n} revisor(es) coinciden). Pulsa Siguiente para continuar.')
                     check.value=False
                 except Exception as e: print(str(e))
         def postpone(_):
@@ -736,9 +917,17 @@ class Proyecto:
         display(W.VBox([choice,full,rotate,output,exp,code,res,dt,em,who,check,W.HBox([approve,skip,next_btn]),msg]))
         load()
 
-    def exportar(self):
+    def exportar(self, doble_revision=False):
+        """Escribe las fechas aprobadas en una copia del Excel y deja constancia.
+
+        doble_revision: False exporta toda aprobación válida; 'no_alta' exige dos revisores
+        distintos cuando la confianza OCR no fue ALTA; True exige dos revisores siempre.
+        Genera además revision_*.csv y acta_exportacion_*.json con las huellas SHA-256.
+        """
         if sha256(self.excel) != self.fingerprint:
             raise ValueError('El Excel original cambió. Usa una carpeta de resultados nueva y vuelve a verificar las coincidencias.')
+        if doble_revision not in (False,True,'no_alta'):
+            raise ValueError("doble_revision debe ser False, True o 'no_alta'.")
         proposals = defaultdict(list)
         report = []
         for rid in sorted(getattr(self,'active',self.records)):
@@ -746,15 +935,26 @@ class Proyecto:
             a = r.get('aprobacion') if r['estado']=='APROBADO' else None
             d = (a or {}).get('datos') or r.get('lectura') or {}
             target,issues = evaluar(d,self.index)
+            vigentes = self.aprobaciones_vigentes(r) if a else []
+            revisores = sorted({x['revisor'] for x in vigentes})
             entry = {'id':rid,'archivos':' | '.join(r['archivos']),'estado':r['estado'],
                      'expediente':d.get('expediente'),'codigo':d.get('codigo'),'fecha':d.get('fecha_notificacion'),
                      'hoja':target['hoja'] if target else '', 'celda':target['celda'] if target else '',
-                     'revisor':a['revisor'] if a else '', 'resultado':'NO EXPORTADO',
+                     'revisor':' | '.join(revisores), 'revisiones':len(revisores),
+                     'aprobado_en':a['fecha'] if a else '', 'confianza_ocr':r.get('confianza') or '',
+                     'lectura_ocr':(r.get('lectura') or {}).get('fecha_notificacion') or '',
+                     'alertas':' | '.join(alertas(d,target)),
+                     'evidencia':' | '.join(sorted((a.get('evidencia') or {}).values())) if a else '',
+                     'resultado':'NO EXPORTADO',
                      'detalle':'; '.join(issues) or r.get('error') or ''}
             report.append(entry)
             if a and not issues and target:
                 if sha256(self.path(r)) != rid:
                     entry['detalle']='La fotografía cambió desde la aprobación.'
+                    continue
+                exige_dos = doble_revision is True or (doble_revision=='no_alta' and r.get('confianza')!='ALTA')
+                if exige_dos and len(revisores) < 2:
+                    entry.update(resultado='FALTA SEGUNDA REVISION',detalle='Requiere confirmación de un segundo revisor distinto.')
                     continue
                 proposals[(target['hoja'],target['celda'])].append((fecha(d['fecha_notificacion']),entry))
         updates = {}
@@ -768,7 +968,8 @@ class Proyecto:
             for _,entry in items: entry['resultado']='INCLUIDO'
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
         report_path = self.salida/f'revision_{stamp}.csv'
-        columns = ['id','archivos','estado','expediente','codigo','fecha','hoja','celda','revisor','resultado','detalle']
+        columns = ['id','archivos','estado','expediente','codigo','fecha','hoja','celda','revisor','revisiones','aprobado_en',
+                   'confianza_ocr','lectura_ocr','alertas','evidencia','resultado','detalle']
         def safe(v):
             s = str(v if v is not None else '')
             return "'"+s if s.startswith(('=','+','-','@','\t','\r')) else s
@@ -781,8 +982,16 @@ class Proyecto:
             return None,report_path
         output = self.salida/f'expedientes_actualizados_{stamp}.xlsx'
         patch_xlsx(self.excel,output,updates,self.epoch)
+        acta = {'version':VERSION,'generado_en':ahora(),'excel_original':{'ruta':str(self.excel),'sha256':self.fingerprint},
+                'excel_generado':{'ruta':str(output),'sha256':sha256(output)},'informe_csv':report_path.name,
+                'alcance':{'hoja':HOJA,'fecha_emision':FECHA_EMISION.isoformat()},'doble_revision':doble_revision,
+                'celdas_escritas':len(updates),
+                'detalle':[{k:e[k] for k in ('hoja','celda','fecha','expediente','codigo','id','archivos','revisor','revisiones',
+                                             'aprobado_en','confianza_ocr','lectura_ocr','evidencia')}
+                           for e in report if e['resultado']=='INCLUIDO']}
+        atomic_json(self.salida/f'acta_exportacion_{stamp}.json',acta)
         print(f'Excel generado: {len(updates)} celdas confirmadas. Las demás conservan su valor anterior.')
-        print(output); print(report_path)
+        print(output); print(report_path); print(self.salida/f'acta_exportacion_{stamp}.json')
         return output, report_path
 
     def paquete_revision(self, limite=20):
