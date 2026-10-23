@@ -1,3 +1,5 @@
+# Dependencias completas para Colab (la celda 1 instala solo las que faltan).
+# Colab ya trae torch con CUDA; los rangos evitan reinstalarlo.
 paddlepaddle==3.2.0
 paddleocr==3.3.2
 transformers==4.57.6
@@ -9,3 +11,4 @@ openpyxl==3.1.5
 Pillow>=10,<13
 lxml>=5,<7
 ipywidgets>=8,<9
+tqdm>=4,<5

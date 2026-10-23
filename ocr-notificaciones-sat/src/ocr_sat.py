@@ -10,10 +10,51 @@ from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.utils.datetime import to_excel
 from lxml import etree as ET
 
-VERSION = '2026-09-02-v1'
+VERSION = '2026-10-23-v2'
 NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 N = {'s': NS}
 EXTENSIONES = {'.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.bmp'}
+
+# Alcance fijo del lote. Se cambia solo con configurar(); lo usan el índice, la
+# evaluación y la escritura del XLSX, de modo que las tres barreras coinciden.
+HOJA = '2026'
+FECHA_EMISION = date(2026, 9, 2)
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - tqdm viene instalado en Colab
+    tqdm = None
+
+
+def configurar(hoja=None, fecha_emision=None):
+    """Fija la hoja anual y la fecha de emisión REC que delimitan el lote.
+
+    Devuelve (hoja, fecha_emision). Una carpeta de resultados queda ligada a
+    esta configuración mediante proyecto.json.
+    """
+    global HOJA, FECHA_EMISION
+    nueva_hoja = HOJA if hoja is None else str(hoja).strip()
+    if not re.fullmatch(r'20\d{2}', nueva_hoja):
+        raise ValueError('La hoja debe ser un año de cuatro cifras, por ejemplo 2026.')
+    nueva_fecha = FECHA_EMISION if fecha_emision is None else fecha(fecha_emision)
+    if nueva_fecha is None:
+        raise ValueError('Fecha de emisión inválida. Usa el formato DD/MM/AAAA.')
+    if str(nueva_fecha.year) != nueva_hoja:
+        raise ValueError(f'La fecha de emisión {nueva_fecha:%d/%m/%Y} no pertenece a la hoja {nueva_hoja}.')
+    HOJA, FECHA_EMISION = nueva_hoja, nueva_fecha
+    return HOJA, FECHA_EMISION
+
+
+def _progreso(iterable, total, desc):
+    """Barra de progreso con tiempo estimado; si no hay tqdm, imprime cada 25."""
+    if tqdm is not None:
+        return tqdm(iterable, total=total, desc=desc, unit='foto', dynamic_ncols=True)
+    def plano():
+        for i, item in enumerate(iterable, 1):
+            yield item
+            if i % 25 == 0 or i == total:
+                print(f'{desc}: {i}/{total}', flush=True)
+    return plano()
 
 def ahora():
     return datetime.now(ZoneInfo('America/Lima')).isoformat(timespec='seconds')
@@ -72,8 +113,8 @@ def texto_celda(value):
     return value
 
 def build_index(excel, hojas):
-    if tuple(hojas) != ('2026',):
-        raise ValueError('Solo se permite la hoja 2026.')
+    if tuple(hojas) != (HOJA,):
+        raise ValueError(f'Solo se permite la hoja {HOJA}.')
     if not zipfile.is_zipfile(excel):
         raise ValueError('El archivo no es un XLSX válido o está incompleto. Ábrelo en Excel y guarda una copia .xlsx antes de continuar.')
     wb = load_workbook(excel, read_only=True, data_only=False, keep_links=True)
@@ -144,8 +185,8 @@ def evaluar(data, index):
             issues.append(f'Coincidencias de expediente/año en Excel: {len(matches)}. Debe existir exactamente una.')
         else:
             target = matches[0]
-            if target['hoja'] != '2026' or fecha(target['emision']) != date(2026,9,2):
-                issues.append('Fuera del alcance: solo 2026 con E = 02/09/2026.')
+            if target['hoja'] != HOJA or fecha(target['emision']) != FECHA_EMISION:
+                issues.append(f'Fuera del alcance: solo {HOJA} con E = {FECHA_EMISION:%d/%m/%Y}.')
             if target['fecha_actual'] not in (None, ''):
                 issues.append('La notificación ya está registrada. Se conserva sin modificar.')
             if not codigo(data.get('codigo')) or codigo(data.get('codigo')) != target['codigo']:
@@ -220,19 +261,50 @@ def seleccionar_muestra(paths, raiz, cantidad=30, semilla=2026):
 
 class MotorOCR:
     """PaddleOCR + TrOCR; EasyOCR y DeepSeek local como alternativas."""
-    def __init__(self, motor='paddle_trocr', gpu=False, trocr_model='microsoft/trocr-base-handwritten'):
+    def __init__(self, motor='paddle_trocr', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
+                 paddle_gpu=False, modo_rapido=False, cpu_threads=None):
+        """Carga los modelos una sola vez.
+
+        gpu: usa CUDA para TrOCR si está disponible.
+        paddle_gpu: intenta ejecutar PaddleOCR en GPU (requiere paddlepaddle-gpu);
+            si falla, vuelve a CPU y lo informa.
+        modo_rapido: detector PP-OCRv5 mobile, varias veces más rápido en CPU
+            con algo menos de precisión en textos pequeños.
+        cpu_threads: hilos para Paddle en CPU; por defecto todos los del entorno.
+        """
         if motor not in ('paddle_trocr','easyocr','deepseek_local'):
             raise ValueError('Motor desconocido: '+str(motor))
         self.paddle=None
         self.trocr=None
+        self.opciones=dict(motor=motor,gpu=gpu,trocr_model=trocr_model,paddle_gpu=paddle_gpu,
+                           modo_rapido=modo_rapido,cpu_threads=cpu_threads)
         if motor=='paddle_trocr':
             from paddleocr import PaddleOCR
             import torch
             from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-            # CPU para Paddle evita conflictos entre sus bibliotecas CUDA y PyTorch.
-            self.paddle=PaddleOCR(lang='es',ocr_version='PP-OCRv5',device='cpu',
-                use_doc_orientation_classify=False,use_doc_unwarping=False,
-                use_textline_orientation=False,enable_mkldnn=False)
+            paddle_kwargs=dict(use_doc_orientation_classify=False,use_doc_unwarping=False,
+                use_textline_orientation=False,enable_mkldnn=False,
+                cpu_threads=int(cpu_threads or os.cpu_count() or 2))
+            if modo_rapido:
+                # Al nombrar modelos, PaddleOCR ignora lang/ocr_version: se fijan los dos.
+                # lang='es' equivale a PP-OCRv5_server_det + latin_PP-OCRv5_mobile_rec.
+                paddle_kwargs.update(text_detection_model_name='PP-OCRv5_mobile_det',
+                                     text_recognition_model_name='latin_PP-OCRv5_mobile_rec')
+            else:
+                paddle_kwargs.update(lang='es',ocr_version='PP-OCRv5')
+            self.paddle_device='cpu'
+            if paddle_gpu:
+                try:
+                    import paddle
+                    if not paddle.device.is_compiled_with_cuda():
+                        raise RuntimeError('paddlepaddle instalado sin CUDA')
+                    self.paddle=PaddleOCR(device='gpu',**paddle_kwargs)
+                    self.paddle_device='gpu'
+                except Exception as e:
+                    print('PaddleOCR en GPU no disponible; se usará CPU. Motivo:',str(e)[:200])
+            if self.paddle is None:
+                # CPU para Paddle evita conflictos entre sus bibliotecas CUDA y PyTorch.
+                self.paddle=PaddleOCR(device='cpu',**paddle_kwargs)
             self.trocr_device='cuda' if gpu and torch.cuda.is_available() else 'cpu'
             self.processor=TrOCRProcessor.from_pretrained(trocr_model)
             self.trocr=VisionEncoderDecoderModel.from_pretrained(trocr_model).to(self.trocr_device).eval()
@@ -243,7 +315,8 @@ class MotorOCR:
         self.ds_model=None
         self.ds_tokenizer=None
         if motor=='paddle_trocr':
-            self.nombre='PaddleOCR PP-OCRv5 + '+trocr_model+' ('+self.trocr_device+')'
+            self.nombre=('PaddleOCR PP-OCRv5'+(' mobile-det' if modo_rapido else '')+' ('+self.paddle_device+') + '
+                         +trocr_model+' ('+self.trocr_device+')')
         if motor=='deepseek_local':
             import torch
             if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
@@ -271,13 +344,18 @@ class MotorOCR:
         return [{'box':[[float(x),float(y)] for x,y in box], 'text':str(text),'score':float(score)} for box,text,score in rows]
 
     def read_handwritten(self,im):
+        return self.read_handwritten_lote([im])[0]
+
+    def read_handwritten_lote(self,imagenes):
+        """Una sola pasada de TrOCR para varias vistas del mismo recorte."""
         import torch
-        pixels=self.processor(images=im.convert('RGB'),return_tensors='pt').pixel_values.to(self.trocr_device)
+        pixels=self.processor(images=[im.convert('RGB') for im in imagenes],return_tensors='pt').pixel_values.to(self.trocr_device)
         with torch.inference_mode():
             ids=self.trocr.generate(pixels,max_new_tokens=32,num_beams=4,do_sample=False)
-        return self.processor.batch_decode(ids,skip_special_tokens=True)[0].strip()
+        return [t.strip() for t in self.processor.batch_decode(ids,skip_special_tokens=True)]
 
     def leer(self,path):
+        """Lee una fotografía (ruta o archivo en memoria) y propone los campos."""
         with Image.open(path) as src:
             if getattr(src,'n_frames',1)>1:
                 raise ValueError('Imagen de varias páginas: sepárala antes de procesar.')
@@ -314,14 +392,15 @@ class MotorOCR:
         crop=im.crop(roi)
         crop=crop.resize((crop.width*2,crop.height*2),Image.Resampling.LANCZOS)
         candidates=[]
-        for label,view in [('color',crop),('contraste',ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB'))]:
+        views=[('color',crop),('contraste',ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB'))]
+        for label,view in views:
             rows=self.read(view,digits=True)
             text=' '.join(r['text'] for r in sorted(rows,key=lambda r:min(x for x,y in r['box'])))
             ds=dates_in_text(text)
             evidence['variantes_fecha'].append({'vista':label,'texto':text,'fechas':ds,'detecciones':rows})
             candidates.append(ds)
-            if self.trocr is not None:
-                handwritten=self.read_handwritten(view)
+        if self.trocr is not None:
+            for (label,_),handwritten in zip(views,self.read_handwritten_lote([v for _,v in views])):
                 hd=dates_in_text(handwritten)
                 evidence['variantes_fecha'].append({'vista':'trocr_'+label,'texto':handwritten,'fechas':hd})
                 candidates.append(hd)
@@ -352,7 +431,8 @@ class MotorOCR:
 
 
 class Proyecto:
-    def __init__(self, fotos, excel, salida, hojas=('2026',)):
+    def __init__(self, fotos, excel, salida, hojas=None):
+        hojas = tuple(hojas) if hojas else (HOJA,)
         self.fotos, self.excel, self.salida = Path(fotos).expanduser().resolve(), Path(excel).expanduser().resolve(), Path(salida).expanduser().resolve()
         if not self.fotos.is_dir():
             raise ValueError(f'No existe la carpeta de fotos: {self.fotos}')
@@ -365,10 +445,15 @@ class Proyecto:
         self.records_dir.mkdir(exist_ok=True)
         self.fingerprint = sha256(self.excel)
         cfg_path = self.salida/'proyecto.json'
-        cfg = {'version':VERSION,'excel_sha256':self.fingerprint,'hojas':list(hojas)}
-        if cfg_path.exists() and json.loads(cfg_path.read_text(encoding='utf-8')) != cfg:
-            raise ValueError('Esta carpeta de resultados corresponde a otro Excel o configuración. Elige otra carpeta de salida.')
+        cfg = {'version':VERSION,'excel_sha256':self.fingerprint,'hojas':list(hojas),
+               'fecha_emision':FECHA_EMISION.isoformat()}
+        if cfg_path.exists():
+            previo = json.loads(cfg_path.read_text(encoding='utf-8'))
+            # Las carpetas creadas por versiones anteriores no guardaban fecha_emision.
+            if any(k in previo and previo[k] != cfg[k] for k in ('excel_sha256','hojas','fecha_emision')):
+                raise ValueError('Esta carpeta de resultados corresponde a otro Excel o configuración. Elige otra carpeta de salida.')
         atomic_json(cfg_path,cfg)
+        self.cache_path = self.salida/'inventario_cache.json'
         self.index, self.resumen_hojas, self.epoch = build_index(self.excel,hojas)
         self.records = {}
         for p in self.records_dir.glob('*.json'):
@@ -382,27 +467,77 @@ class Proyecto:
         atomic_json(self.records_dir/f"{r['id']}.json",r)
         self.records[r['id']] = r
 
-    def inventario(self, seleccion=None):
-        paths = sorted(p for p in self.fotos.rglob('*') if p.is_file() and p.suffix.lower() in EXTENSIONES and '__MACOSX' not in p.parts) if seleccion is None else sorted(set(Path(p).resolve() for p in seleccion))
+    def listar_fotos(self):
+        return sorted(p for p in self.fotos.rglob('*') if p.is_file() and p.suffix.lower() in EXTENSIONES and '__MACOSX' not in p.parts)
+
+    def inventario(self, seleccion=None, rehash=False):
+        """Identifica cada foto por el SHA-256 de su contenido.
+
+        En Drive el cálculo completo tarda; por eso se guarda inventario_cache.json
+        con (tamaño, fecha de modificación) de cada archivo y se reutiliza la huella
+        cuando ambos coinciden. Con rehash=True se vuelve a leer todo el contenido.
+        """
+        paths = self.listar_fotos() if seleccion is None else sorted(set(Path(p).resolve() for p in seleccion))
         for p in paths:
             if self.fotos not in p.resolve().parents or not p.is_file() or p.suffix.lower() not in EXTENSIONES:
                 raise ValueError('Archivo seleccionado fuera de la carpeta de fotos o no admitido: '+str(p))
+        cache = {}
+        if not rehash and self.cache_path.exists():
+            try:
+                cache = json.loads(self.cache_path.read_text(encoding='utf-8'))
+            except Exception:
+                cache = {}
         active = defaultdict(list)
-        total_bytes = 0
-        for i,p in enumerate(paths,1):
-            digest = sha256(p)
-            active[digest].append(p.relative_to(self.fotos).as_posix())
-            total_bytes += p.stat().st_size
-            if i % 250 == 0:
-                print(f'Inventario: {i}/{len(paths)} fotos')
+        total_bytes, reutilizadas, nuevo_cache = 0, 0, {}
+        for p in _progreso(paths, len(paths), 'Inventario'):
+            rel = p.relative_to(self.fotos).as_posix()
+            st = p.stat()
+            previo = cache.get(rel)
+            if previo and previo.get('tam') == st.st_size and previo.get('mtime_ns') == st.st_mtime_ns:
+                digest = previo['sha256']; reutilizadas += 1
+            else:
+                digest = sha256(p)
+            nuevo_cache[rel] = {'tam': st.st_size, 'mtime_ns': st.st_mtime_ns, 'sha256': digest}
+            active[digest].append(rel)
+            total_bytes += st.st_size
+        if seleccion is None:
+            atomic_json(self.cache_path, nuevo_cache)
+        else:
+            cache.update(nuevo_cache); atomic_json(self.cache_path, cache)
+        guardados = 0
         for digest, aliases in active.items():
-            r = self.records.get(digest,{'id':digest,'estado':'NUEVO','lectura':None,'aprobacion':None})
-            r['archivos'] = aliases
-            self.save(r)
+            r = self.records.get(digest)
+            if r is None:
+                r = {'id':digest,'estado':'NUEVO','lectura':None,'aprobacion':None,'archivos':aliases}
+            elif r.get('archivos') == aliases:
+                continue  # sin cambios: no se reescribe el registro en Drive
+            else:
+                r['archivos'] = aliases
+            self.save(r); guardados += 1
         self.active = set(active)
         print(f'{len(paths)} fotos; {len(active)} contenidos únicos; {len(paths)-len(active)} copias idénticas; {total_bytes/1e9:.2f} GB.')
+        print(f'Huellas reutilizadas de la caché: {reutilizadas}; registros escritos: {guardados}.')
         print('Hojas:', self.resumen_hojas)
         self.estado()
+
+    def ids_de(self, paths):
+        """Identificadores (SHA-256) de las fotos indicadas, según el inventario actual."""
+        if not hasattr(self,'active'):
+            raise ValueError('Ejecuta primero el inventario.')
+        por_ruta = {name: k for k in self.active for name in self.records[k]['archivos']}
+        ids = []
+        for p in paths:
+            rel = Path(p).resolve().relative_to(self.fotos).as_posix()
+            if rel not in por_ruta:
+                raise ValueError('Foto no inventariada: '+rel)
+            if por_ruta[rel] not in ids:
+                ids.append(por_ruta[rel])
+        return ids
+
+    def pendientes(self, reintentar_errores=False):
+        """Identificadores aún sin lectura (NUEVO, y ERROR si se reintenta)."""
+        eligible={'NUEVO'} | ({'ERROR'} if reintentar_errores else set())
+        return [k for k in sorted(getattr(self,'active',self.records)) if self.records[k]['estado'] in eligible]
 
     def path(self,r):
         for name in r['archivos']:
@@ -416,20 +551,34 @@ class Proyecto:
         print('Estados:',dict(counts))
         return counts
 
-    def procesar(self,motor,limite=100,reintentar_errores=False,reprocesar_pendientes=False):
+    def procesar(self,motor,limite=100,reintentar_errores=False,reprocesar_pendientes=False,solo=None):
+        """Lee las fotos pendientes y guarda cada propuesta al instante.
+
+        solo: colección de identificadores a los que se limita la pasada (p. ej. una
+        muestra). Cada foto se lee de Drive una sola vez: la huella se calcula sobre
+        los mismos bytes que recibe el OCR. Devuelve un resumen con tiempos.
+        """
         if not hasattr(self,'active'):
             raise ValueError('Ejecuta primero el inventario.')
         if limite < 1: raise ValueError('El límite debe ser mayor que cero.')
         eligible={'NUEVO'} | ({'ERROR'} if reintentar_errores else set())
-        pending=[self.records[k] for k in sorted(self.active)
+        universo=sorted(self.active) if solo is None else [k for k in solo if k in self.active]
+        pending=[self.records[k] for k in universo
                  if self.records[k]['estado'] in eligible or
                  (reprocesar_pendientes and self.records[k]['estado'] in {'POR_REVISAR','PENDIENTE'}
                   and self.records[k].get('motor')!=motor.nombre)][:limite]
-        for i,r in enumerate(pending,1):
+        resumen={'procesadas':0,'confirmar':0,'discrepancias':0,'errores':0,'segundos':0.0,'detenido':False}
+        inicio=time.monotonic()
+        barra=_progreso(pending,len(pending),'OCR')
+        for r in barra:
+            contar=True
             try:
                 p=self.path(r)
-                if sha256(p)!=r['id']: raise ValueError('La foto cambió. Repite el inventario.')
-                d,evidence=motor.leer(p)
+                datos=p.read_bytes()
+                if hashlib.sha256(datos).hexdigest()!=r['id']: raise ValueError('La foto cambió. Repite el inventario.')
+                t0=time.monotonic()
+                d,evidence=motor.leer(io.BytesIO(datos))
+                evidence['segundos']=round(time.monotonic()-t0,2)
                 target,issues=evaluar(d,self.index)
                 if r.get('lectura') is not None:
                     r.setdefault('historial_ocr',[]).append({k:r.get(k) for k in
@@ -437,17 +586,32 @@ class Proyecto:
                 r.update(lectura=d,estado='POR_REVISAR',destino=target,problemas=issues,
                          evidencia_ocr=evidence,motor=motor.nombre,leido_en=ahora(),error=None)
                 self.save(r)
-                print(f'{i}/{len(pending)}: {p.name} — '+('revisar discrepancias' if issues else 'confirmar visualmente'))
+                resumen['discrepancias' if issues else 'confirmar']+=1
             except KeyboardInterrupt:
                 print('Detenido. El avance anterior está guardado.')
+                resumen['detenido']=True; contar=False
                 break
             except Exception as e:
                 r.update(estado='ERROR',error=str(e)[:500]); self.save(r)
-                print(f'{i}/{len(pending)}: error registrado en {r["archivos"][0]}')
+                resumen['errores']+=1
+                mensaje=f'Error registrado en {r["archivos"][0]}: {str(e)[:120]}'
+                (tqdm.write if tqdm is not None else print)(mensaje)
                 if 'out of memory' in str(e).lower():
                     print('Memoria insuficiente. Detenido; reinicia el entorno o usa CPU con EasyOCR.')
+                    resumen['detenido']=True
                     break
+            finally:
+                resumen['procesadas']+=contar
+                if tqdm is not None and hasattr(barra,'set_postfix'):
+                    barra.set_postfix(ok=resumen['confirmar'],rev=resumen['discrepancias'],err=resumen['errores'],refresh=False)
+        resumen['segundos']=round(time.monotonic()-inicio,1)
+        if resumen['procesadas']:
+            por_foto=resumen['segundos']/resumen['procesadas']
+            restantes=len(self.pendientes(reintentar_errores))
+            print(f"{resumen['procesadas']} fotos en {resumen['segundos']/60:.1f} min ({por_foto:.1f} s/foto). "
+                  f"Pendientes: {restantes}; estimado {restantes*por_foto/3600:.1f} h a este ritmo.")
         self.estado()
+        return resumen
 
     def aprobar(self,rid,data,revisor):
         if not revisor.strip():
@@ -484,7 +648,7 @@ class Proyecto:
         def prioridad(k):
             d=self.records[k].get('lectura') or {}
             t,_=evaluar(d,self.index)
-            return 0 if t and fecha(t['emision'])==date(2026,9,2) and t['fecha_actual'] in (None,'') else 1
+            return 0 if t and fecha(t['emision'])==FECHA_EMISION and t['fecha_actual'] in (None,'') else 1
         ids.sort(key=prioridad)
         if not ids:
             print('Todavía no hay lecturas. Ejecuta el procesamiento primero.')
@@ -721,14 +885,14 @@ def patch_xlsx(source, output, updates, epoch):
     # Segunda barrera: incluso una llamada directa debe respetar E, F y hoja.
     if Path(source).resolve() == Path(output).resolve():
         raise ValueError('La salida debe ser una copia distinta del original.')
-    index, _, original_epoch = build_index(source, ('2026',))
+    index, _, original_epoch = build_index(source, (HOJA,))
     allowed = {(r['hoja'],r['celda']):r for items in index.values() if len(items)==1
-               for r in items if fecha(r['emision'])==date(2026,9,2)
+               for r in items if fecha(r['emision'])==FECHA_EMISION
                and r['fecha_actual'] in (None,'')}
     for key,d in updates.items():
         if key not in allowed:
             raise ValueError('Celda fuera del alcance o ya ocupada: '+str(key))
-        if not isinstance(d,date) or not date(2026,9,2)<=d<=datetime.now(ZoneInfo('America/Lima')).date():
+        if not isinstance(d,date) or not FECHA_EMISION<=d<=datetime.now(ZoneInfo('America/Lima')).date():
             raise ValueError('Fecha de notificación inválida: '+str(d))
     if not updates:
         raise ValueError('No hay fechas confirmadas para escribir.')

@@ -1,54 +1,58 @@
 # OCR Notificaciones SAT
 
-Proyecto para procesar 3.996 fotografías desde Google Drive y completar fechas de notificación REC en una copia del Excel de expedientes.
+Extractor de datos de páginas escaneadas pensado para **Google Colab**. Lee fotografías de notificaciones (REC) guardadas en Google Drive, propone con OCR gratuito el expediente, el código SIGETI, la resolución y la **fecha manuscrita de notificación**, y, tras un cotejo visual obligatorio, escribe esa fecha en una **copia** del Excel de expedientes. El original nunca se modifica.
 
 [![Abrir en Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ricardohuaytallavillanueva14-lab/ATAJOS/blob/main/ocr-notificaciones-sat/notebooks/REC_2026_02_SEPTIEMBRE_Colab.ipynb)
 
-## Alcance del Excel
+## Cómo funciona
 
-| Elemento | Regla |
+| Etapa | Qué hace |
 | --- | --- |
-| Hoja | `2026` |
-| Columna E | Filtro por fecha de emisión **02/09/2026** |
-| Columna F | Destino de la fecha de notificación, solo si está vacía |
-| Cruce | Expediente y año únicos, código SIGETI de K coincidente, REC UNO |
-| Aprobación | Cotejo visual antes de escribir |
-| Salida | Copia nueva; el original se conserva |
+| 1 · Preparación | Monta Drive, cuenta las fotos, instala solo lo que falta y guarda los modelos en Drive. |
+| 2 · Excel e inventario | Carga el Excel (desde Drive o subido), fija hoja y fecha de emisión, inventaría las fotos por contenido. |
+| 3 · Prueba con muestra | Procesa ~20 fotos repartidas por carpetas y estima el tiempo total. |
+| 4 · Procesamiento | PaddleOCR (PP-OCRv5) + TrOCR manuscrito sobre todas las pendientes, con progreso y reanudación. |
+| 5 · Revisión | Muestra encabezado, cargo y recorte de la fecha; el revisor corrige y confirma. |
+| 6 · Exportación | Copia del XLSX con las fechas confirmadas y un informe CSV. |
+| 7 · Opcional | ZIP con casos pendientes para una segunda revisión externa. |
 
-El archivo revisado tiene 3.401 filas con la emisión indicada, de las cuales 1.950 tienen F vacía. El código comprueba el SHA-256 del Excel específico para evitar cargar otro archivo por accidente.
+Alcance por defecto: hoja `2026`, filas con columna E (emisión REC) = `02/09/2026` y columna F (notificación REC) vacía. Ambos valores se cambian en la celda 2 y quedan registrados en `proyecto.json` de la carpeta de resultados, de modo que una carpeta no se mezcla con otro Excel ni otro lote.
 
-## Uso
+## Uso en Colab
 
-1. Abre el botón **Abrir en Colab**. Si deseas conservar cambios, guarda una copia del cuaderno en tu Drive.
-2. Utiliza un entorno alojado, preferentemente con GPU T4.
-3. Ejecuta la celda 1: autoriza Drive, verifica el inventario e instala dependencias.
-4. Ejecuta la celda 2: sube el Excel original si lo solicita. Se guarda para reutilizarlo. Espera el inventario completo.
-5. Ejecuta la celda 3: procesa todas las imágenes únicas y guarda cada lectura.
-6. Ejecuta la celda 4: coteja imágenes, corrige campos y confirma las lecturas legibles.
-7. Ejecuta la celda 5: genera la copia del Excel y el informe CSV.
+1. Pulsa **Abrir en Colab** y guarda una copia en tu Drive si quieres conservar cambios.
+2. Elige *Entorno de ejecución > Cambiar tipo de entorno de ejecución > GPU T4*.
+3. Rellena los formularios de cada celda (rutas de Drive, cantidad de fotos, hoja, fecha de emisión) y ejecútalas en orden.
+4. Tras la celda 3, mira los segundos por foto y la estimación de horas. Si supera tu sesión de Colab, usa `LIMITE` en la celda 4 para avanzar por lotes o activa `MODO_RAPIDO`.
+5. Revisa en la celda 5 y exporta en la 6 tantas veces como necesites.
 
-La celda 6 es opcional: crea un paquete de hasta 20 casos pendientes para una segunda revisión. No envía imágenes a ningún asistente automáticamente.
+Rutas por defecto en Drive:
 
-## Rutas de Drive
+- Fotos: `/content/drive/MyDrive/01_SAT_Huamanga/PROYECTO REC 1`
+- Resultados: `/content/drive/MyDrive/01_SAT_Huamanga/REC_2026_02SEP_RESULTADOS`
+- Caché de modelos: `/content/drive/MyDrive/01_SAT_Huamanga/modelos_ocr_cache`
 
-Fotos: `/content/drive/MyDrive/01_SAT_Huamanga/PROYECTO REC 1`
+El repositorio solo contiene software y documentación. Fotografías, Excel, lecturas y aprobaciones viven en Drive. No agregues datos de contribuyentes al repositorio.
 
-Resultados: `/content/drive/MyDrive/01_SAT_Huamanga/REC_2026_02SEP_RESULTADOS`
+## Mejoras para Colab
 
-El repositorio contiene software y documentación. Las fotografías, el Excel, las lecturas y las aprobaciones se guardan en Drive. No agregues datos de contribuyentes al repositorio público.
-
-## Reanudación
-
-Si se pierde la conexión, reconecta y comprueba si existe una ejecución activa antes de iniciar otra. Tras perder el estado del entorno, ejecuta 1 y 2 y luego 3. Los registros guardados se recuperan; el inventario vuelve a verificar las imágenes. No ejecutes dos sesiones contra la misma salida.
-
-Los errores anteriores no se reintentan por defecto. Cambia `REINTENTAR_ERRORES = True` en la celda 3 para reintentarlos. La celda 3 también llama a la exportación: produce un informe y puede generar una copia si ya había aprobaciones recuperadas.
+- **Formularios** (`# @param`) en todas las celdas: sin editar código para cambiar rutas, lote o límites.
+- **Instalación inteligente**: solo instala paquetes ausentes o con otra versión; respeta el `torch` con CUDA de Colab y avisa si hace falta reiniciar.
+- **Caché de modelos en Drive** (`HF_HOME`, `PADDLE_PDX_CACHE_HOME`): TrOCR y PaddleOCR no se descargan en cada sesión.
+- **Caché de inventario** (`inventario_cache.json`): al reanudar, las huellas SHA-256 se reutilizan si tamaño y fecha coinciden; los registros sin cambios no se reescriben en Drive.
+- **Una sola lectura por foto**: la huella se calcula sobre los mismos bytes que recibe el OCR.
+- **Progreso y estimaciones**: barra `tqdm`, segundos por foto, horas restantes y resumen por lote.
+- **Celda de prueba** con muestra reproducible repartida entre carpetas.
+- **Opciones de rendimiento**: `MODO_RAPIDO` (detector PP-OCRv5 mobile + reconocedor latino) y `PADDLE_GPU` (requiere `paddlepaddle-gpu`; vuelve a CPU si falla). TrOCR procesa las vistas del recorte en un solo lote.
+- **Alcance configurable** con `configurar(hoja, fecha_emision)`, aplicado por igual al índice, la evaluación y la escritura del XLSX.
+- **Compatibilidad**: las carpetas de resultados creadas con la versión anterior se abren sin cambios.
 
 ## Código y mantenimiento
 
 - `src/ocr_sat.py`: extracción, inventario, revisión, validación y escritura del XLSX.
-- `templates/`: código de las seis celdas y guía incorporada.
+- `templates/`: código de las siete celdas y guía incorporada. La celda 2 incrusta `src/ocr_sat.py`.
 - `scripts/build_notebook.py`: reconstruye el cuaderno autocontenido.
-- `notebooks/`: cuaderno listo para Colab.
+- `notebooks/`: cuaderno listo para Colab (sin salidas).
 - `tests/test_excel.py`: pruebas con datos ficticios, sin descargar modelos.
 - `docs/CONTEXTO_CLAUDE.md`: contexto de supervisión y recuperación.
 
@@ -60,12 +64,12 @@ python -m unittest discover -s tests -v
 python scripts/build_notebook.py
 ```
 
-Las dependencias completas están en `requirements.txt`. La celda 1 las instala en Colab. El cuaderno se ejecuta solo, sin clonar el repositorio.
+Tras cambiar cualquier plantilla o `src/ocr_sat.py`, ejecuta `build_notebook.py` y confirma el `.ipynb`: una prueba y el flujo de GitHub Actions comprueban que el cuaderno coincide con las plantillas.
 
 ## Validación y límites
 
-Se verificó la escritura sobre una copia del Excel real: solo cambió la celda objetivo y su formato; las otras partes del XLSX se conservaron. Las pruebas reproducibles del repositorio usan un libro ficticio para comprobar el alcance, fórmulas, duplicados y celdas ocupadas.
+Las pruebas reproducibles usan un libro ficticio para comprobar alcance, fórmulas, duplicados, celdas ocupadas, caché del inventario y procesamiento por muestra con un motor simulado. La escritura se verificó antes sobre una copia del Excel real: solo cambió la celda objetivo y su formato.
 
-El OCR completo de las 3.996 fotografías y su precisión aún no se han validado. PaddleOCR utiliza CPU y TrOCR usa GPU si está disponible. El recorte automático está adaptado al encabezado y cargo inferior; fotografías giradas, diseños distintos, AVISO PREVIO y CEDULON pueden requerir revisión manual. Las coincidencias entre motores no constituyen una tasa de exactitud medida. Los límites de sesión de Colab siguen aplicando.
+El OCR completo del lote y su precisión no se han medido. Las puntuaciones del OCR no son probabilidades de acierto; cada propuesta exige cotejo visual. PaddleOCR corre en CPU salvo que se active `PADDLE_GPU`; TrOCR usa la GPU de Colab si existe. Fotografías giradas, otros diseños, AVISO PREVIO y CEDULON pueden requerir transcripción manual. Los límites de sesión de Colab siguen aplicando: el avance se guarda por foto y se reanuda.
 
 No se incluye una licencia de redistribución: el titular puede añadir la que corresponda.
