@@ -931,9 +931,15 @@ class Proyecto:
                'fecha_emision':FECHA_EMISION.isoformat()}
         if cfg_path.exists():
             previo = json.loads(cfg_path.read_text(encoding='utf-8'))
-            # Las carpetas creadas por versiones anteriores no guardaban fecha_emision.
-            if any(k in previo and previo[k] != cfg[k] for k in ('excel_sha256','hojas','fecha_emision')):
-                raise ValueError('Esta carpeta de resultados corresponde a otro Excel o configuración. Elige otra carpeta de salida.')
+            # Las carpetas creadas por versiones anteriores no guardaban fecha_emision. Pasar a trabajar
+            # sin Excel (excel_sha256 None) no invalida los avances: las lecturas no dependen del Excel.
+            huella_previa = previo.get('excel_sha256') or previo.get('excel_sha256_anterior')
+            if huella_previa and cfg['excel_sha256'] and huella_previa != cfg['excel_sha256']:
+                raise ValueError('Esta carpeta de resultados corresponde a otro Excel. Elige otra carpeta de salida.')
+            if any(k in previo and previo[k] != cfg[k] for k in ('hojas','fecha_emision')):
+                raise ValueError('Esta carpeta de resultados corresponde a otra configuración (hoja o fecha de emisión). Elige otra carpeta de salida.')
+            if cfg['excel_sha256'] is None and huella_previa:
+                cfg['excel_sha256_anterior'] = huella_previa
         atomic_json(cfg_path,cfg)
         self.cache_path = self.salida/'inventario_cache.json'
         if self.excel:
