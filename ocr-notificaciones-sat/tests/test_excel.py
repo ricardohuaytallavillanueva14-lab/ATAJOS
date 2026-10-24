@@ -239,6 +239,16 @@ class FiabilidadTests(unittest.TestCase):
         class M: vlm=None
         self.assertIn('no es alcanzable',c.aviso_lectores(M()))
         M.vlm=object(); self.assertIn('Qwen2.5-VL',c.aviso_lectores(M()))
+    def test_fallo_de_carga_del_vlm_no_detiene_el_motor(self):
+        m=c.MotorOCR.__new__(c.MotorOCR)
+        m.vlm=None; m.gpu=False; m.nombre='detector + trocr'
+        def falla(model_name,gpu): raise RuntimeError('CUDA out of memory (simulado)')
+        m._cargar_vlm=falla
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            m._activar_vlm('Qwen/Qwen2.5-VL-3B-Instruct')
+        self.assertIsNone(m.vlm); self.assertIn('out of memory',m.vlm_error)
+        self.assertIn('no se pudo cargar el lector VLM',out.getvalue()); self.assertEqual(m.nombre,'detector + trocr')
+        self.assertIn('no se cargó',c.aviso_lectores(m)); self.assertIn('no es alcanzable',c.aviso_lectores(m))
     def test_alertas_plausibilidad(self):
         original=c.VENTANA_DIAS
         try:

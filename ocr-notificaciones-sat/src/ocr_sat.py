@@ -119,7 +119,8 @@ def aviso_lectores(motor):
     """Texto para pantalla sobre qué lectores manuscritos hay y si ALTA es alcanzable."""
     manuscritos = ['TrOCR'] + (['Qwen2.5-VL'] if getattr(motor, 'vlm', None) is not None else [])
     if len(manuscritos) < 2:
-        return ('Lectores manuscritos activos: ' + ', '.join(manuscritos) + '. Con un solo lector manuscrito la '
+        error = getattr(motor, 'vlm_error', None)
+        return ((f'El lector VLM no se cargó ({error}). ' if error else '') + 'Lectores manuscritos activos: ' + ', '.join(manuscritos) + '. Con un solo lector manuscrito la '
                 'confianza ALTA no es alcanzable (es intencional): todas las fechas quedarán como máximo en MEDIA '
                 'y requieren el mismo cotejo visual. Activa LECTOR_VLM para poder alcanzar ALTA.')
     return 'Lectores manuscritos activos: ' + ', '.join(manuscritos) + '. ALTA exige que ambos coincidan.'
@@ -628,9 +629,26 @@ class MotorOCR:
         self.processor = TrOCRProcessor.from_pretrained(trocr_model)
         self.trocr = VisionEncoderDecoderModel.from_pretrained(trocr_model).to(self.trocr_device).eval()
         self.nombre = self.detector_nombre + ' + ' + trocr_model + ' (' + self.trocr_device + ')'
+        self.vlm_error = None
         if vlm:
-            self._cargar_vlm(MODELOS_VLM[vlm], self.gpu)
-            self.nombre += ' + ' + MODELOS_VLM[vlm] + ' (' + self.vlm_device + ')'
+            self._activar_vlm(MODELOS_VLM[vlm])
+
+    def _activar_vlm(self, model_name):
+        """Carga el VLM; si falla (memoria, pesos, versión), sigue sin él y lo dice con claridad."""
+        try:
+            self._cargar_vlm(model_name, self.gpu)
+            self.nombre += ' + ' + model_name + ' (' + self.vlm_device + ')'
+        except Exception as e:
+            self.vlm = None
+            self.vlm_error = f'{type(e).__name__}: {str(e)[:300]}'
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            print('AVISO: no se pudo cargar el lector VLM ' + model_name + '. Se continúa con TrOCR como único lector '
+                  'manuscrito, así que la confianza ALTA no será alcanzable en esta pasada. Motivo: ' + self.vlm_error)
 
     def _cargar_paddle(self, paddle_gpu, modo_rapido, cpu_threads, orientacion_auto):
         from paddleocr import PaddleOCR

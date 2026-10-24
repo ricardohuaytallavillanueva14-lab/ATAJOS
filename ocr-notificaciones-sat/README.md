@@ -78,6 +78,17 @@ Cadena de evidencia que queda en Drive:
 
 Límites que conviene declarar en cualquier uso formal: la garantía proviene del cotejo humano y de la trazabilidad, no del OCR. La celda 3 mide el acierto del OCR contra las filas que ya tienen F registrada en el Excel (patrón de referencia) sobre una muestra de 80 fotos antes de la pasada completa.
 
+## Licencias de los modelos
+
+| Modelo | Licencia | Uso en este proyecto |
+| --- | --- | --- |
+| PaddleOCR PP-OCRv5 | Apache-2.0 | Detector impreso |
+| EasyOCR | Apache-2.0 | Detector impreso alternativo |
+| microsoft/trocr-base-handwritten | MIT | Lector manuscrito |
+| Qwen/Qwen2.5-VL-3B-Instruct | **Qwen Research License Agreement** (Alibaba Cloud): uso de investigación y evaluación no comercial; el uso comercial requiere licencia aparte. Es distinta de la Apache-2.0 del modelo de 7B. | Lector manuscrito opcional (`LECTOR_VLM`) |
+
+La licencia del 3B se tomó de fuentes secundarias que citan el archivo `LICENSE` del repositorio del modelo (no fue posible abrir huggingface.co desde el entorno donde se escribió esto): confírmala en https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/main/LICENSE antes de usarlo en un procedimiento institucional. Si el uso no encaja en esa licencia, desactiva `LECTOR_VLM` (la confianza ALTA deja de ser alcanzable y todas las fechas se cotejan igual) o sustituye el modelo por `Qwen2.5-VL-7B-Instruct` (Apache-2.0), que en una T4 requiere cuantización a 4 bits y no está integrado. Si el VLM no carga en fp16 en la T4, el cuaderno captura el error, continúa sin él y lo avisa en pantalla.
+
 ## Código y mantenimiento
 
 - `src/ocr_sat.py`: extracción, inventario, revisión, validación y escritura del XLSX.
