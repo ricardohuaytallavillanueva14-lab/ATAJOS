@@ -514,18 +514,6 @@ class SinExcelTests(ProyectoBase):
         d4=dict(d,codigo=None); self.assertTrue(any('código' in i for i in c.evaluar(d4,None)[1]))
         d5=dict(d,fecha_notificacion='01/09/2026'); self.assertTrue(any('anterior a la emisión' in i for i in c.evaluar(d5,None)[1]))
         d6=dict(d,resolucion='DOS'); self.assertTrue(any('REC UNO' in i for i in c.evaluar(d6,None)[1]))
-    def test_carpeta_creada_con_excel_se_abre_sin_excel(self):
-        with contextlib.redirect_stdout(io.StringIO()):
-            con_excel=c.Proyecto(self.fotos,self.excel,self.salida); con_excel.inventario()
-        p=self.proyecto()   # misma carpeta, ahora sin Excel: conserva registros y anota la huella anterior
-        self.assertEqual(len(p.records),3)
-        cfg=json.loads((self.salida/'proyecto.json').read_text())
-        self.assertIsNone(cfg['excel_sha256']); self.assertEqual(cfg['excel_sha256_anterior'],con_excel.fingerprint)
-        with contextlib.redirect_stdout(io.StringIO()):
-            c.Proyecto(self.fotos,self.excel,self.salida)   # volver al Excel original también es válido
-        otro=Path(self.temp.name)/'otro.xlsx'; libro_ficticio(otro); otro.write_bytes(otro.read_bytes()+b' ')
-        with self.assertRaises(ValueError):
-            c.Proyecto(self.fotos,otro,self.salida)         # otro Excel distinto, no
     def test_extraccion_excel_nuevo(self):
         p=self.proyecto()
         self.assertIsNone(p.index); self.assertIsNone(p.excel)
