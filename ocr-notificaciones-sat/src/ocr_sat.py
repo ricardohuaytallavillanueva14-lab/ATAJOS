@@ -971,7 +971,13 @@ class Proyecto:
             print('Ninguna foto de la muestra corresponde a una fila con F ya registrada; amplía la muestra.')
         return res
 
-    def aprobar(self,rid,data,revisor):
+    def aprobar(self,rid,data,revisor,verifico_rec_uno=False):
+        """Registra la confirmación visual de un revisor.
+
+        verifico_rec_uno: obligatorio cuando no se leyó el número de resolución; el revisor
+        declara haber comprobado en la foto que se trata de la REC UNO. Si se leyó otra
+        resolución, evaluar() bloquea la aprobación.
+        """
         if not revisor.strip():
             raise ValueError('Escribe el nombre o iniciales de quien revisa.')
         r = self.records[rid]
@@ -983,6 +989,8 @@ class Proyecto:
             raise ValueError('\n'.join(issues))
         if not target:
             raise ValueError('Falta el destino.')
+        if data.get('resolucion') in (None,'') and not verifico_rec_uno:
+            raise ValueError('No se leyó el número de resolución. Marca «Verifiqué visualmente que es la REC UNO» para aprobar, o escribe la resolución leída en la foto.')
         previous = r.get('aprobacion')
         if previous:
             mismos = all((previous.get('datos') or {}).get(f)==data.get(f) for f in ('expediente','codigo','resolucion','fecha_notificacion'))
@@ -991,6 +999,7 @@ class Proyecto:
             r.setdefault('historial_aprobaciones',[]).append(previous)
         entrada = {'datos':data,'destino':target,'revisor':revisor.strip(),'fecha':ahora(),
                    'confianza_ocr':r.get('confianza'),'alertas':alertas(data,target),
+                   'verifico_rec_uno':bool(verifico_rec_uno),
                    'lectura_ocr':(r.get('lectura') or {}).get('fecha_notificacion'),
                    'evidencia':self.guardar_evidencia(r)}
         r.setdefault('aprobaciones',[]).append(entrada)
@@ -1068,6 +1077,7 @@ class Proyecto:
         em = W.Text(description='Emisión REC:',placeholder='DD/MM/AAAA',style={'description_width':'140px'})
         who = W.Text(description='Revisor:',style={'description_width':'140px'})
         check = W.Checkbox(value=False,description='He cotejado expediente, código, resolución y fecha con la foto.',indent=False,layout=W.Layout(width='98%'))
+        rec_uno = W.Checkbox(value=False,description='Verifiqué visualmente que es la REC UNO (obligatorio si la resolución no se leyó).',indent=False,layout=W.Layout(width='98%'))
         approve = W.Button(description='Confirmar y guardar',button_style='success')
         skip = W.Button(description='Dejar pendiente')
         next_btn = W.Button(description='Siguiente')
@@ -1123,7 +1133,7 @@ class Proyecto:
             d = (r['aprobacion']['datos'] if r.get('aprobacion') else r.get('lectura')) or {}
             for widget,field in [(exp,'expediente'),(code,'codigo'),(res,'resolucion'),(dt,'fecha_notificacion'),(em,'fecha_emision')]:
                 widget.value = d.get(field) or ''
-            angle[0]=0; check.value=False
+            angle[0]=0; check.value=False; rec_uno.value=False
             with msg: clear_output()
             show_image()
         def advance(_=None):
@@ -1140,7 +1150,7 @@ class Proyecto:
                     d = dict(r.get('lectura') or {})
                     d.update(expediente=exp.value,codigo=code.value,resolucion=res.value,
                              fecha_notificacion=dt.value,fecha_emision=em.value)
-                    self.aprobar(choice.value,d,who.value)
+                    self.aprobar(choice.value,d,who.value,verifico_rec_uno=rec_uno.value)
                     n=len({a['revisor'] for a in self.aprobaciones_vigentes(self.records[choice.value])})
                     print(f'Confirmado y guardado ({n} revisor(es) coinciden). Pulsa Siguiente para continuar.')
                     check.value=False
@@ -1156,7 +1166,7 @@ class Proyecto:
             show_image()
         choice.observe(load,names='value'); approve.on_click(confirm); skip.on_click(postpone)
         next_btn.on_click(advance); rotate.on_click(turn); full.observe(lambda _:show_image(),names='value')
-        display(W.VBox([choice,full,rotate,output,exp,code,res,dt,em,who,check,W.HBox([approve,skip,next_btn]),msg]))
+        display(W.VBox([choice,full,rotate,output,exp,code,res,dt,em,who,check,rec_uno,W.HBox([approve,skip,next_btn]),msg]))
         load()
 
     def exportar(self, doble_revision=False):
@@ -1184,6 +1194,7 @@ class Proyecto:
                      'hoja':target['hoja'] if target else '', 'celda':target['celda'] if target else '',
                      'revisor':' | '.join(revisores), 'revisiones':len(revisores),
                      'aprobado_en':a['fecha'] if a else '', 'confianza_ocr':r.get('confianza') or '','tipo':r.get('tipo') or '',
+                     'verifico_rec_uno':('si' if a.get('verifico_rec_uno') else 'no') if a else '',
                      'lectura_ocr':(r.get('lectura') or {}).get('fecha_notificacion') or '',
                      'alertas':' | '.join(alertas(d,target)),
                      'evidencia':' | '.join(sorted((a.get('evidencia') or {}).values())) if a else '',
@@ -1211,7 +1222,7 @@ class Proyecto:
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
         report_path = self.salida/f'revision_{stamp}.csv'
         columns = ['id','archivos','estado','tipo','expediente','codigo','fecha','hoja','celda','revisor','revisiones','aprobado_en',
-                   'confianza_ocr','lectura_ocr','alertas','evidencia','resultado','detalle']
+                   'verifico_rec_uno','confianza_ocr','lectura_ocr','alertas','evidencia','resultado','detalle']
         def safe(v):
             s = str(v if v is not None else '')
             return "'"+s if s.startswith(('=','+','-','@','\t','\r')) else s
@@ -1229,7 +1240,7 @@ class Proyecto:
                 'alcance':{'hoja':HOJA,'fecha_emision':FECHA_EMISION.isoformat()},'doble_revision':doble_revision,
                 'celdas_escritas':len(updates),
                 'detalle':[{k:e[k] for k in ('hoja','celda','fecha','expediente','codigo','id','archivos','revisor','revisiones',
-                                             'aprobado_en','confianza_ocr','lectura_ocr','evidencia')}
+                                             'aprobado_en','verifico_rec_uno','confianza_ocr','lectura_ocr','evidencia')}
                            for e in report if e['resultado']=='INCLUIDO']}
         atomic_json(self.salida/f'acta_exportacion_{stamp}.json',acta)
         print(f'Excel generado: {len(updates)} celdas confirmadas. Las demás conservan su valor anterior.')

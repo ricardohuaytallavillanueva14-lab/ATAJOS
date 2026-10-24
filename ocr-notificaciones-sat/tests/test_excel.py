@@ -249,7 +249,7 @@ class ExportacionLegalTests(ProyectoBase):
         with contextlib.redirect_stdout(io.StringIO()):
             xlsx,csv_path=p.exportar(doble_revision='no_alta')
         self.assertIsNone(xlsx)
-        filas=list(__import__('csv').DictReader(csv_path.open(encoding='utf-8-sig'),delimiter=';'))
+        with csv_path.open(encoding='utf-8-sig') as fh: filas=list(__import__('csv').DictReader(fh,delimiter=';'))
         fila=next(f for f in filas if f['id']==rid)
         self.assertEqual(fila['resultado'],'FALTA SEGUNDA REVISION'); self.assertEqual(fila['confianza_ocr'],'MEDIA')
         self.assertIn('_fecha.jpg',fila['evidencia'])
@@ -275,6 +275,26 @@ class ExportacionLegalTests(ProyectoBase):
             xlsx,_=p.exportar(doble_revision=False)
         self.assertIsNotNone(xlsx)
         self.assertEqual(load_workbook(xlsx)['2026']['F2'].value.date(),date(2026,9,16))
+    def test_resolucion_no_leida_exige_casilla(self):
+        p=self.preparar(); rid=sorted(p.active)[0]
+        sin=self.datos(); sin['resolucion']=None
+        with self.assertRaises(ValueError) as cm:
+            p.aprobar(rid,sin,'Ana')
+        self.assertIn('REC UNO',str(cm.exception)); self.assertEqual(p.records[rid]['estado'],'POR_REVISAR')
+        otra=self.datos(); otra['resolucion']='DOS'
+        with self.assertRaises(ValueError):
+            p.aprobar(rid,otra,'Ana',verifico_rec_uno=True)
+        p.aprobar(rid,sin,'Ana',verifico_rec_uno=True)
+        self.assertTrue(p.records[rid]['aprobacion']['verifico_rec_uno'])
+        self.assertTrue(any('resoluci' in a for a in p.records[rid]['aprobacion']['alertas']))
+        p.aprobar(rid,self.datos(),'Luis')  # con resolución leída no hace falta la casilla
+        self.assertFalse(p.records[rid]['aprobacion']['verifico_rec_uno'])
+        with contextlib.redirect_stdout(io.StringIO()):
+            xlsx,csv_path=p.exportar()
+        with csv_path.open(encoding='utf-8-sig') as fh: filas=list(__import__('csv').DictReader(fh,delimiter=';'))
+        self.assertEqual(next(f for f in filas if f['id']==rid)['verifico_rec_uno'],'no')
+        actas=sorted(self.salida.glob('acta_exportacion_*.json'))
+        self.assertIn('verifico_rec_uno',json.loads(actas[-1].read_text(encoding='utf-8'))['detalle'][0])
 
 def caja(x1,y1,x2,y2,text,score=0.9):
     return {'box':[[x1,y1],[x2,y1],[x2,y2],[x1,y2]],'text':text,'score':score}
