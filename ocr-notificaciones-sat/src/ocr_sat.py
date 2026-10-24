@@ -323,19 +323,71 @@ def parse_header(text):
                         resolution.append(sig); break
     return exp,code,resolution[0] if len(set(resolution))==1 else None
 
-def dates_in_text(text):
-    """Fechas DD/MM/AAAA completas en el texto; admite separadores variados o cifras seguidas (15092026)."""
-    matches = re.findall(r'(?<!\d)(\d{1,2})\s*[/ .-]\s*(\d{1,2})\s*[/ .-]\s*(20\d{2})(?!\d)',text)
+def _fecha_iso(day, month, year):
+    try:
+        return date(int(year), int(month), int(day)).isoformat()
+    except ValueError:
+        return None
+
+
+def _fechas_exactas(text):
+    """Patrones de fecha sin ninguna corrección de caracteres."""
+    matches = re.findall(r'(?<!\d)(\d{1,2})\s*[/ .-]\s*(\d{1,2})\s*[/ .-]\s*(20\d{2})(?!\d)', text)
     # Con la tinta aislada las barras finas pueden desaparecer: 8 cifras seguidas DDMMAAAA.
-    matches += re.findall(r'(?<!\d)(\d{2})(\d{2})(20\d{2})(?!\d)',text)
+    matches += re.findall(r'(?<!\d)(\d{2})(\d{2})(20\d{2})(?!\d)', text)
     # Año de dos cifras (16/09/26) solo con separadores, para no confundirlo con otros números.
-    matches += [(d,m,'20'+y) for d,m,y in re.findall(r'(?<!\d)(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{2})(?!\d)',text)]
-    matches += [(d,m,'20'+y) for d,m,y in re.findall(r'(?<!\d)(\d{1,2}) +(\d{1,2}) +(\d{2})(?!\d)',text)]
-    out = set()
-    for day,month,year in matches:
-        try: out.add(date(int(year),int(month),int(day)).isoformat())
-        except ValueError: pass
-    return sorted(out)
+    matches += [(d, m, '20' + y) for d, m, y in re.findall(r'(?<!\d)(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{2})(?!\d)', text)]
+    matches += [(d, m, '20' + y) for d, m, y in re.findall(r'(?<!\d)(\d{1,2}) +(\d{1,2}) +(\d{2})(?!\d)', text)]
+    return {f for f in (_fecha_iso(*m) for m in matches) if f}
+
+
+_CONFUSIONES = str.maketrans({'O': '0', 'o': '0', 'I': '1', 'l': '1', '|': '1'})
+
+
+def extraer_fechas(text):
+    """Fechas del texto en dos listas.
+
+    exactas: patrones DD/MM/AAAA (o DD/MM/AA con separadores) tal cual, incluso con espacios
+        entre dígitos ('1 5 / 0 9 / 2 0 2 6'), que se eliminan porque no cambian ninguna cifra.
+    corregidas: candidatas obtenidas sustituyendo O→0 e I/l→1 solo dentro de un patrón de
+        fecha, o recortando un año de cinco cifras que contiene '20AA'. Son ambiguas: se
+        muestran al revisor, pueden proponerse si no hay nada mejor y nunca cuentan para la
+        confianza ALTA. Nunca se completan dígitos que faltan ni se adivina el año.
+    """
+    text = str(text or '')
+    compacto = re.sub(r'(?<=\d) +(?=\d)', '', text)
+    exactas = _fechas_exactas(text) | _fechas_exactas(compacto)
+    corregidas = {}
+    patron = r'(?<![0-9A-Za-z])([0-9OoIl|]{1,2})\s*[/.-]\s*([0-9OoIl|]{1,2})\s*[/.-]\s*([0-9OoIl|]{4}|[0-9OoIl|]{2})(?![0-9A-Za-z])'
+    for fuente in (text, compacto):
+        for m in re.finditer(patron, fuente):
+            bruto = m.group(0)
+            if sum(ch in 'OoIl|' for ch in bruto) == 0 or sum(ch in 'OoIl|' for ch in bruto) > 2:
+                continue
+            d, mo, y = (g.translate(_CONFUSIONES) for g in m.groups())
+            if not (d.isdigit() and mo.isdigit() and y.isdigit()):
+                continue
+            if len(y) == 2:
+                y = '20' + y
+            elif not y.startswith('20'):
+                continue
+            f = _fecha_iso(d, mo, y)
+            if f and f not in exactas:
+                corregidas.setdefault(f, {'fecha': f, 'regla': 'O→0, I/l→1', 'texto': bruto.strip()})
+        for m in re.finditer(r'(?<!\d)(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{5})(?!\d)', fuente):
+            d, mo, y5 = m.groups()
+            for y in (y5[:4], y5[1:]):
+                if y.startswith('20'):
+                    f = _fecha_iso(d, mo, y)
+                    if f and f not in exactas:
+                        corregidas.setdefault(f, {'fecha': f, 'regla': 'año de 5 cifras', 'texto': m.group(0).strip()})
+                    break
+    return {'exactas': sorted(exactas), 'corregidas': [corregidas[k] for k in sorted(corregidas)]}
+
+
+def dates_in_text(text):
+    """Fechas exactas (sin correcciones) del texto; véase extraer_fechas()."""
+    return extraer_fechas(text)['exactas']
 
 def seleccionar_muestra(paths, raiz, cantidad=30, semilla=2026):
     """Muestra reproducible repartida por carpeta principal y subcarpeta final."""
@@ -661,32 +713,40 @@ class MotorOCR:
         evidence['tinta_azul'] = round(fraccion, 5)
         if tinta is not None:
             views.append(('tinta', tinta))
+        corregidas = {}
+        def registrar(vista, texto, detecciones=None):
+            ex = extraer_fechas(texto)
+            entrada = {'vista': vista, 'texto': texto, 'fechas': ex['exactas'], 'fechas_corregidas': ex['corregidas']}
+            if detecciones is not None:
+                entrada['detecciones'] = detecciones
+            evidence['variantes_fecha'].append(entrada)
+            candidates.append(ex['exactas'])
+            for cnd in ex['corregidas']:
+                corregidas.setdefault(cnd['fecha'], dict(cnd, vista=vista))
         for label, view in views:
             rows = self.read(view, digits=True)
             text = ' '.join(r['text'] for r in sorted(rows, key=lambda r: min(x for x, y in r['box'])))
-            ds = dates_in_text(text)
-            evidence['variantes_fecha'].append({'vista': label, 'texto': text, 'fechas': ds, 'detecciones': rows})
-            candidates.append(ds)
+            registrar(label, text, rows)
         if self.trocr is not None:
             for (label, _), handwritten in zip(views, self.read_handwritten_lote([v for _, v in views])):
-                hd = dates_in_text(handwritten)
-                evidence['variantes_fecha'].append({'vista': 'trocr_' + label, 'texto': handwritten, 'fechas': hd})
-                candidates.append(hd)
+                registrar('trocr_' + label, handwritten)
         if self.vlm is not None:
             for label, view in [('vlm_color', crop)] + ([('vlm_tinta', tinta)] if tinta is not None else []):
                 try:
                     respuesta = self.read_vlm(view)
                 except Exception as e:
                     respuesta = 'ERROR: ' + str(e)[:120]
-                vd = [] if 'ILEGIBLE' in respuesta.upper() else dates_in_text(respuesta)
-                evidence['variantes_fecha'].append({'vista': label, 'texto': respuesta, 'fechas': vd})
-                candidates.append(vd)
+                registrar(label, '' if 'ILEGIBLE' in respuesta.upper() else respuesta)
+                if 'ILEGIBLE' in respuesta.upper():
+                    evidence['variantes_fecha'][-1]['texto'] = respuesta
         # Control cruzado: en NEGATIVA la misma fecha se escribe también en el acta ('del día __/__/__').
         acta = fecha_acta_negativa(foot_abs)
         if acta:
             evidence['variantes_fecha'].append({'vista': 'acta_negativa', 'texto': 'fecha del acta de negativa', 'fechas': acta})
             candidates.append(acta)
         nonempty = {x for seq in candidates for x in seq}
+        evidence['candidatas_corregidas'] = [corregidas[k] for k in sorted(corregidas)]
+        evidence['propuesta_corregida'] = False
         # Una lectura es una propuesta; todas requieren confirmación visual.
         if len(nonempty) == 1:
             data['fecha_notificacion'] = next(iter(nonempty))
@@ -694,8 +754,17 @@ class MotorOCR:
             data['observaciones'] = 'Fecha propuesta por OCR. Cotejar visualmente; la coincidencia entre lectores no garantiza exactitud.'
         elif len(nonempty) > 1:
             data['observaciones'] = 'Lecturas de fecha contradictorias: ' + ', '.join(sorted(nonempty))
+        elif len(corregidas) == 1:
+            cnd = next(iter(corregidas.values()))
+            data['fecha_notificacion'] = cnd['fecha']
+            data['fecha_texto'] = cnd['texto']
+            data['observaciones'] = (f"Candidata corregida ({cnd['regla']}) a partir de '{cnd['texto']}'. "
+                                     'Es ambigua: verifica cada cifra en el recorte antes de confirmar.')
+            evidence['propuesta_corregida'] = True
         else:
             data['observaciones'] = 'El OCR no obtuvo una fecha completa. Introducirla desde el recorte; no se adivina el año.'
+            if len(corregidas) > 1:
+                data['observaciones'] += ' Candidatas corregidas distintas: ' + ', '.join(sorted(corregidas)) + '.'
         nivel, coinciden = nivel_confianza(evidence['variantes_fecha'], data['fecha_notificacion'])
         evidence['confianza'] = nivel; evidence['lectores_coinciden'] = coinciden
         return data, evidence
@@ -1120,6 +1189,8 @@ class Proyecto:
                     print('Confianza OCR:',r.get('confianza') or '-','| lectores que coinciden:',', '.join((r.get('evidencia_ocr') or {}).get('lectores_coinciden') or []) or 'ninguno')
                     for v in (r.get('evidencia_ocr') or {}).get('variantes_fecha') or []:
                         print(f"  {v['vista']:<12} -> {', '.join(v.get('fechas') or []) or 'sin fecha'} | texto: {str(v.get('texto'))[:60]}")
+                    for cnd in (r.get('evidencia_ocr') or {}).get('candidatas_corregidas') or []:
+                        print(f"  candidata corregida ({cnd['regla']}, {cnd.get('vista')}): {cnd['fecha']} desde '{cnd['texto']}'. No cuenta para la confianza.")
                     print('Observaciones de lectura:',data.get('observaciones') or 'Ninguna')
                     print('Comprobaciones:',issues or 'Coinciden; falta tu comprobación visual.')
                     for aviso in alertas(data,target): print('ALERTA:',aviso)

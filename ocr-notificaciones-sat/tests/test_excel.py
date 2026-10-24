@@ -185,6 +185,32 @@ class FiabilidadTests(unittest.TestCase):
         self.assertEqual(c.dates_in_text('16 09 26'),['2026-09-16'])
         self.assertEqual(c.dates_in_text('21/9/26 y 22/9/26'),['2026-09-21','2026-09-22'])
         self.assertEqual(c.dates_in_text('160926'),[])
+        # Espacios entre dígitos: se eliminan sin cambiar cifras (exacta).
+        self.assertEqual(c.dates_in_text('1 5 / 0 9 / 2 0 2 6'),['2026-09-15'])
+        self.assertEqual(c.extraer_fechas('1 5 / 0 9 / 2 0 2 6'),{'exactas':['2026-09-15'],'corregidas':[]})
+        self.assertEqual(c.dates_in_text('5 15/09/2026'),['2026-09-15'])  # el folio no se pega a la fecha
+    def test_fechas_corregidas_son_solo_candidatas(self):
+        # O→0 dentro de un patrón de fecha: candidata corregida, nunca exacta.
+        ex=c.extraer_fechas('15/09/2O26')
+        self.assertEqual(ex['exactas'],[]); self.assertEqual([x['fecha'] for x in ex['corregidas']],['2026-09-15'])
+        self.assertEqual(ex['corregidas'][0]['regla'],'O→0, I/l→1')
+        ex=c.extraer_fechas('l5/O9/2026')
+        self.assertEqual(ex['exactas'],[]); self.assertEqual([x['fecha'] for x in ex['corregidas']],['2026-09-15'])
+        # Año de 5 cifras: candidata ambigua.
+        ex=c.extraer_fechas('15/09/12026')
+        self.assertEqual(ex['exactas'],[]); self.assertEqual([x['fecha'] for x in ex['corregidas']],['2026-09-15'])
+        self.assertEqual(ex['corregidas'][0]['regla'],'año de 5 cifras')
+        # Fuera de un patrón de fecha no se sustituye nada; no se completan dígitos ni se adivina el año.
+        self.assertEqual(c.extraer_fechas('FOLIOS 5 OI lO'),{'exactas':[],'corregidas':[]})
+        self.assertEqual(c.extraer_fechas('15/09/202'),{'exactas':[],'corregidas':[]})
+        self.assertEqual(c.extraer_fechas('15/09'),{'exactas':[],'corregidas':[]})
+        self.assertEqual(c.extraer_fechas('OO/OO/OOOO'),{'exactas':[],'corregidas':[]})
+        # Una exacta y su versión corregida son la misma fecha: no se duplica.
+        ex=c.extraer_fechas('15/09/2026 15/09/2O26')
+        self.assertEqual(ex,{'exactas':['2026-09-15'],'corregidas':[]})
+        # Las corregidas no cuentan para la confianza: solo entran las 'fechas' exactas.
+        v=[{'vista':'trocr_color','fechas':[],'fechas_corregidas':ex['corregidas']},{'vista':'vlm_color','fechas':[]}]
+        self.assertEqual(c.nivel_confianza(v,'2026-09-15'),('MEDIA',[]))
         self.assertEqual(c.dates_in_text('Siendo las 9:00 horas, del dia 11/09/2026'),['2026-09-11'])
         self.assertEqual(c.dates_in_text('15-9-2026 y 03/06/2026'),['2026-06-03','2026-09-15'])
         self.assertEqual(c.dates_in_text('31022026'),[])
