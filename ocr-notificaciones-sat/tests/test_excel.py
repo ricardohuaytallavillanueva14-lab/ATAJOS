@@ -502,64 +502,6 @@ class EmparejamientoTests(ProyectoBase):
             con=p.conciliar(guardar=False)
         self.assertEqual(con['expedientes_fuera_del_lote'],1)
 
-class SinExcelTests(ProyectoBase):
-    def proyecto(self):
-        with contextlib.redirect_stdout(io.StringIO()):
-            return c.Proyecto(self.fotos,None,self.salida)
-    def test_evaluar_sin_indice(self):
-        d=dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',nombre='X',fecha_notificacion='15/09/2026',fecha_emision='02/09/2026')
-        self.assertEqual(c.evaluar(d,None),(None,[]))
-        d2=dict(d,fecha_emision='03/09/2026'); self.assertTrue(any('Fuera del lote' in i for i in c.evaluar(d2,None)[1]))
-        d3=dict(d,expediente='16-012-1-2025'); self.assertTrue(any('año del expediente' in i for i in c.evaluar(d3,None)[1]))
-        d4=dict(d,codigo=None); self.assertTrue(any('código' in i for i in c.evaluar(d4,None)[1]))
-        d5=dict(d,fecha_notificacion='01/09/2026'); self.assertTrue(any('anterior a la emisión' in i for i in c.evaluar(d5,None)[1]))
-        d6=dict(d,resolucion='DOS'); self.assertTrue(any('REC UNO' in i for i in c.evaluar(d6,None)[1]))
-    def test_extraccion_excel_nuevo(self):
-        p=self.proyecto()
-        self.assertIsNone(p.index); self.assertIsNone(p.excel)
-        self.assertEqual(json.loads((self.salida/'proyecto.json').read_text())['excel_sha256'],None)
-        with contextlib.redirect_stdout(io.StringIO()):
-            p.inventario(); p.procesar(MotorFalso(),limite=10)
-            self.assertIsNone(p.resumen_alcance()); self.assertIsNone(p.conciliar()); self.assertIsNone(p.medir_acierto())
-        ids=sorted(p.active)
-        # Tres fotos del mismo expediente: una confirmada, otra con fecha distinta, otra de otro lote.
-        p.aprobar(ids[0],dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',nombre='PERSONA FICTICIA',fecha_notificacion='15/09/2026',fecha_emision='02/09/2026'),'Ana')
-        p.records[ids[1]]['lectura'].update(expediente='16-012-2-2026',fecha_notificacion='16/09/2026')
-        p.records[ids[2]]['lectura'].update(expediente='16-012-3-2026',fecha_emision='03/09/2026')
-        with self.assertRaises(ValueError):
-            p.exportar()
-        with contextlib.redirect_stdout(io.StringIO()):
-            xlsx,acta=p.exportar_extraccion()
-        wb=load_workbook(xlsx)
-        self.assertEqual(wb.sheetnames,['Expedientes','Fotos','Resumen'])
-        exp=list(wb['Expedientes'].values); cab=exp[0]
-        self.assertEqual(cab[:6],('Expediente','Nombre y apellidos','Código contribuyente','Fecha emisión','Fecha notificación','Resolución'))
-        filas={f[0]:dict(zip(cab,f)) for f in exp[1:]}
-        self.assertEqual(sorted(filas),['16-012-1-2026','16-012-2-2026'])   # el de otro lote queda fuera
-        self.assertEqual(filas['16-012-1-2026']['Verificación'],'Confirmada por Ana')
-        self.assertEqual(filas['16-012-1-2026']['Fecha notificación'].date(),date(2026,9,15))
-        self.assertEqual(filas['16-012-1-2026']['Fecha emisión'].date(),date(2026,9,2))
-        self.assertEqual(filas['16-012-1-2026']['Nombre y apellidos'],'PERSONA FICTICIA'); self.assertEqual(filas['16-012-1-2026']['Código contribuyente'],'123')
-        self.assertEqual(filas['16-012-2-2026']['Verificación'],'Propuesta OCR sin verificar')
-        self.assertEqual(wb['Expedientes']['E2'].number_format,'dd/mm/yyyy')
-        self.assertEqual(len(list(wb['Fotos'].values))-1,3)
-        resumen=dict((r[0],r[1]) for r in wb['Resumen'].values)
-        self.assertEqual((resumen['Fotos únicas'],resumen['Expedientes en la hoja Expedientes'],resumen['Con fecha de notificación']),(3,2,2))
-        wb.close()
-        self.assertEqual(json.loads(Path(acta).read_text(encoding='utf-8'))['excel_generado']['sha256'],c.sha256(xlsx))
-        with contextlib.redirect_stdout(io.StringIO()):
-            xlsx2,_=p.exportar_extraccion(solo_confirmadas=True)
-        self.assertEqual([f[0] for f in list(load_workbook(xlsx2)['Expedientes'].values)[1:]],['16-012-1-2026'])
-        with contextlib.redirect_stdout(io.StringIO()):
-            xlsx3,_=p.exportar_extraccion(filtrar_emision=False)
-        self.assertEqual(len(list(load_workbook(xlsx3)['Expedientes'].values))-1,3)
-        # Conflicto: dos fotos del mismo expediente con fechas distintas y ninguna confirmada.
-        p.records[ids[2]]['lectura'].update(expediente='16-012-2-2026',fecha_emision='02/09/2026',fecha_notificacion='17/09/2026')
-        with contextlib.redirect_stdout(io.StringIO()):
-            xlsx4,_=p.exportar_extraccion()
-        fila=[dict(zip(cab,f)) for f in list(load_workbook(xlsx4)['Expedientes'].values)[1:] if f[0]=='16-012-2-2026'][0]
-        self.assertIsNone(fila['Fecha notificación']); self.assertTrue(fila['Verificación'].startswith('CONFLICTO')); self.assertEqual(fila['Fotos'],2)
-
 class NotebookTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -581,8 +523,6 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('@param',''.join(cells[0]['source']))
         self.assertIn('def configurar(',''.join(cells[1]['source']))
         self.assertIn('DOBLE_REVISION',''.join(cells[5]['source']))
-        self.assertIn('exportar_extraccion',''.join(cells[5]['source']))
-        self.assertIn('USAR_EXCEL',''.join(cells[1]['source']))
         self.assertIn('LECTOR_VLM',''.join(cells[3]['source']))
         self.assertIn('langchain',''.join(cells[0]['source']))
         self.assertIn('medir_acierto',''.join(cells[2]['source']))

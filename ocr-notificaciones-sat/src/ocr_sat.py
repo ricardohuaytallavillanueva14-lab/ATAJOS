@@ -303,20 +303,10 @@ def normalizar_lectura(data):
     return out
 
 def evaluar(data, index):
-    """Comprueba una lectura. index=None significa trabajar sin Excel de expedientes:
-    entonces el lote se delimita con la fecha de emisión impresa en el documento."""
     issues, target = [], None
     parsed = expediente(data.get('expediente'))
     if not parsed or parsed[1] is None:
         issues.append('Expediente completo y año ilegibles o incompletos.')
-    elif index is None:
-        if str(parsed[1]) != HOJA:
-            issues.append(f'El año del expediente ({parsed[1]}) no es el del lote ({HOJA}).')
-        em_doc = fecha(data.get('fecha_emision'))
-        if em_doc and em_doc != FECHA_EMISION:
-            issues.append(f'Fuera del lote: la emisión impresa es {em_doc:%d/%m/%Y} y el lote es {FECHA_EMISION:%d/%m/%Y}.')
-        if not codigo(data.get('codigo')):
-            issues.append('El código del contribuyente no se pudo leer.')
     else:
         matches = index.get(parsed, [])
         if len(matches) != 1:
@@ -910,22 +900,18 @@ class MotorOCR:
 
 class Proyecto:
     def __init__(self, fotos, excel, salida, hojas=None):
-        """excel=None: sin Excel de expedientes. Las lecturas se validan solo contra el documento
-        (año del expediente, emisión impresa, resolución) y el resultado se entrega con
-        exportar_extraccion() como un Excel nuevo con los datos importantes."""
         hojas = tuple(hojas) if hojas else (HOJA,)
-        self.fotos, self.salida = Path(fotos).expanduser().resolve(), Path(salida).expanduser().resolve()
-        self.excel = Path(excel).expanduser().resolve() if excel else None
+        self.fotos, self.excel, self.salida = Path(fotos).expanduser().resolve(), Path(excel).expanduser().resolve(), Path(salida).expanduser().resolve()
         if not self.fotos.is_dir():
             raise ValueError(f'No existe la carpeta de fotos: {self.fotos}')
-        if self.excel is not None and (not self.excel.is_file() or self.excel.suffix.lower() != '.xlsx'):
+        if not self.excel.is_file() or self.excel.suffix.lower() != '.xlsx':
             raise ValueError('Selecciona un archivo .xlsx existente.')
         if self.salida == self.fotos or self.fotos in self.salida.parents:
             raise ValueError('La salida debe estar fuera de la carpeta de fotografías.')
         self.salida.mkdir(parents=True,exist_ok=True)
         self.records_dir = self.salida/'registros'
         self.records_dir.mkdir(exist_ok=True)
-        self.fingerprint = sha256(self.excel) if self.excel else None
+        self.fingerprint = sha256(self.excel)
         cfg_path = self.salida/'proyecto.json'
         cfg = {'version':VERSION,'excel_sha256':self.fingerprint,'hojas':list(hojas),
                'fecha_emision':FECHA_EMISION.isoformat()}
@@ -936,10 +922,7 @@ class Proyecto:
                 raise ValueError('Esta carpeta de resultados corresponde a otro Excel o configuración. Elige otra carpeta de salida.')
         atomic_json(cfg_path,cfg)
         self.cache_path = self.salida/'inventario_cache.json'
-        if self.excel:
-            self.index, self.resumen_hojas, self.epoch = build_index(self.excel,hojas)
-        else:
-            self.index, self.resumen_hojas, self.epoch = None, [], None
+        self.index, self.resumen_hojas, self.epoch = build_index(self.excel,hojas)
         self.records = {}
         for p in self.records_dir.glob('*.json'):
             try:
@@ -1232,9 +1215,6 @@ class Proyecto:
         Antes del OCR solo compara cantidades; con las fotos leídas indica qué filas tienen foto,
         cuáles no, qué fotos apuntan a expedientes fuera del lote y cuáles no traen expediente.
         """
-        if self.index is None:
-            print('Sin Excel de expedientes no hay filas con las que conciliar; usa exportar_extraccion() para el resumen por expediente.')
-            return None
         alcance = {k: items[0] for k, items in self.index.items() if len(items) == 1 and items[0]['hoja'] == HOJA and fecha(items[0]['emision']) == FECHA_EMISION}
         activos = sorted(getattr(self, 'active', self.records))
         por_exp = defaultdict(list)
@@ -1276,9 +1256,6 @@ class Proyecto:
 
     def resumen_alcance(self):
         """Filas de la hoja dentro del alcance (E = fecha de emisión) con F vacía y con F llena."""
-        if self.index is None:
-            print('Sin Excel de expedientes: el lote se delimita por la fecha de emisión impresa en cada documento.')
-            return None
         vacias=llenas=0
         for items in self.index.values():
             for r in items:
@@ -1296,9 +1273,6 @@ class Proyecto:
         confianza x resultado y guarda piloto_<marca>.json en la carpeta de resultados.
         Con menos de minimo_alta casos ALTA con referencia, el acierto de ALTA no es concluyente.
         """
-        if self.index is None:
-            print('Sin Excel de expedientes no hay fechas de referencia para medir el acierto.')
-            return None
         ids=list(ids) if ids is not None else sorted(getattr(self,'active',self.records))
         res={'generado_en':ahora(),'version':VERSION,'fotos_evaluadas':len(ids),'con_referencia':0,'aciertos':0,
              'errores':0,'sin_fecha_ocr':0,'detalle':[]}
@@ -1364,7 +1338,7 @@ class Proyecto:
         target,issues = evaluar(data,self.index)
         if issues:
             raise ValueError('\n'.join(issues))
-        if not target and self.index is not None:
+        if not target:
             raise ValueError('Falta el destino.')
         if data.get('resolucion') in (None,'') and not verifico_rec_uno:
             raise ValueError('No se leyó el número de resolución. Marca «Verifiqué visualmente que es la REC UNO» para aprobar, o escribe la resolución leída en la foto.')
@@ -1550,113 +1524,7 @@ class Proyecto:
         display(W.VBox([choice,full,rotate,output,exp,nom,code,res,dt,em,who,check,rec_uno,W.HBox([approve,skip,next_btn]),msg]))
         load()
 
-    def verificacion(self, r):
-        """Texto de la columna Verificación del Excel nuevo."""
-        if r['estado'] == 'APROBADO':
-            revisores = sorted({a['revisor'] for a in self.aprobaciones_vigentes(r)})
-            return 'Confirmada por ' + ' y '.join(revisores)
-        return {'ANEXO': 'Anexo sin fecha para notificación', 'ERROR': 'Error de lectura', 'NUEVO': 'Sin leer',
-                'PENDIENTE': 'Pendiente (dejada sin confirmar)'}.get(r['estado'], 'Propuesta OCR sin verificar')
-
-    def exportar_extraccion(self, solo_confirmadas=False, filtrar_emision=True):
-        """Excel nuevo con los datos importantes de cada documento. No necesita el Excel original.
-
-        Hoja Expedientes: una fila por expediente (si hay varias fotos, prevalece la confirmada; fechas
-        distintas se marcan como CONFLICTO). Hoja Fotos: una fila por foto con lecturas, confianza,
-        alertas, problemas, archivo y huella. Hoja Resumen: cantidades.
-        solo_confirmadas: incluye en Expedientes solo filas con cotejo humano.
-        filtrar_emision: deja fuera de Expedientes los documentos cuya emisión impresa es de otro lote
-        (quedan en Fotos). Devuelve (ruta_xlsx, ruta_acta_json).
-        """
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill
-        from openpyxl.utils import get_column_letter
-        filas_fotos, por_exp = [], defaultdict(list)
-        for rid in sorted(getattr(self,'active',self.records)):
-            r = self.records[rid]
-            a = r.get('aprobacion') if r['estado']=='APROBADO' else None
-            d = (a or {}).get('datos') or r.get('lectura') or {}
-            target, issues = evaluar(d, self.index) if d else (None, ['Sin lectura'])
-            avisos = alertas(d, target, r.get('evidencia_ocr'))
-            parsed = expediente(d.get('expediente'))
-            fila = {'Expediente': d.get('expediente') or '', 'Nombre y apellidos': d.get('nombre') or '',
-                    'Código contribuyente': codigo(d.get('codigo')) or d.get('codigo') or '',
-                    'Fecha emisión': fecha(d.get('fecha_emision')), 'Fecha notificación': fecha(d.get('fecha_notificacion')),
-                    'Resolución': d.get('resolucion') or '', 'Verificación': self.verificacion(r),
-                    'Revisor(es)': ' | '.join(sorted({x['revisor'] for x in self.aprobaciones_vigentes(r)})) if a else '',
-                    'Confirmada el': a['fecha'] if a else '', 'Confianza OCR': r.get('confianza') or '',
-                    'Tipo documento': r.get('tipo') or '', 'Alertas': ' | '.join(avisos), 'Problemas': '; '.join(issues),
-                    'Archivo(s)': ' | '.join(r['archivos']), 'Huella SHA-256': rid, 'Leído en': r.get('leido_en') or ''}
-            filas_fotos.append(fila)
-            fuera = filtrar_emision and fila['Fecha emisión'] and fila['Fecha emisión'] != FECHA_EMISION
-            if parsed and parsed[1] and r['estado'] not in ('ANEXO','NUEVO','ERROR') and not fuera:
-                por_exp[(parsed[0], parsed[1])].append((r, fila))
-        filas_exp = []
-        for key, items in sorted(por_exp.items()):
-            confirmadas = [f for r, f in items if r['estado']=='APROBADO']
-            base = confirmadas or [f for r, f in items]
-            fechas = {f['Fecha notificación'] for f in base if f['Fecha notificación']}
-            fila = dict(base[0])
-            if len(fechas) > 1:
-                fila['Fecha notificación'] = None
-                fila['Verificación'] = 'CONFLICTO: fotos con fechas distintas (' + ', '.join(f'{x:%d/%m/%Y}' for x in sorted(fechas)) + ')'
-            if solo_confirmadas and not confirmadas:
-                continue
-            fila['Fotos'] = len(items)
-            fila['Archivo(s)'] = ' | '.join(f['Archivo(s)'] for f in base)
-            fila['Huella SHA-256'] = ' | '.join(f['Huella SHA-256'] for f in base)
-            filas_exp.append(fila)
-        columnas_exp = ['Expediente','Nombre y apellidos','Código contribuyente','Fecha emisión','Fecha notificación','Resolución',
-                        'Verificación','Revisor(es)','Confirmada el','Confianza OCR','Alertas','Problemas','Fotos','Archivo(s)','Huella SHA-256']
-        columnas_fotos = ['Expediente','Nombre y apellidos','Código contribuyente','Fecha emisión','Fecha notificación','Resolución',
-                          'Verificación','Revisor(es)','Confirmada el','Confianza OCR','Tipo documento','Alertas','Problemas','Archivo(s)','Huella SHA-256','Leído en']
-        wb = Workbook()
-        def hoja(nombre, columnas, filas, primera=False):
-            ws = wb.active if primera else wb.create_sheet()
-            ws.title = nombre
-            ws.append(columnas)
-            for c in ws[1]:
-                c.font = Font(bold=True); c.fill = PatternFill('solid', fgColor='DDEBF7')
-            for f in filas:
-                ws.append([f.get(c) for c in columnas])
-            for i, col in enumerate(columnas, 1):
-                ws.column_dimensions[get_column_letter(i)].width = 14 if 'Fecha' in col else min(60, max(12, len(col) + 2))
-                if 'Fecha' in col:
-                    for celda in ws[get_column_letter(i)][1:]:
-                        celda.number_format = 'dd/mm/yyyy'
-            ws.freeze_panes = 'A2'
-            ws.auto_filter.ref = ws.dimensions
-            return ws
-        hoja('Expedientes', columnas_exp, filas_exp, primera=True)
-        hoja('Fotos', columnas_fotos, filas_fotos)
-        conteo = Counter(f['Verificación'].split(':')[0].split(' por ')[0] for f in filas_exp)
-        resumen = [('Generado el', ahora()), ('Lote: hoja', HOJA), ('Lote: fecha de emisión', f'{FECHA_EMISION:%d/%m/%Y}'),
-                   ('Fotos (archivos)', sum(len(self.records[k]['archivos']) for k in getattr(self,'active',self.records))),
-                   ('Fotos únicas', len(filas_fotos)), ('Expedientes en la hoja Expedientes', len(filas_exp)),
-                   ('Con fecha de notificación', sum(1 for f in filas_exp if f['Fecha notificación'])),
-                   ('Solo confirmadas', 'sí' if solo_confirmadas else 'no'), ('Filtro por emisión impresa', 'sí' if filtrar_emision else 'no')]
-        resumen += [(f'Verificación: {k}', v) for k, v in sorted(conteo.items())]
-        ws = wb.create_sheet('Resumen')
-        for fila in resumen:
-            ws.append(list(fila))
-        ws.column_dimensions['A'].width = 40; ws.column_dimensions['B'].width = 30
-        stamp = datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6]
-        salida = self.salida / f'extraccion_{stamp}.xlsx'
-        tmp = salida.with_suffix('.tmp.xlsx'); wb.save(tmp); os.replace(tmp, salida)
-        acta = {'version': VERSION, 'generado_en': ahora(), 'excel_generado': {'ruta': str(salida), 'sha256': sha256(salida)},
-                'alcance': {'hoja': HOJA, 'fecha_emision': FECHA_EMISION.isoformat()}, 'solo_confirmadas': solo_confirmadas,
-                'filtrar_emision': filtrar_emision, 'expedientes': len(filas_exp), 'fotos': len(filas_fotos),
-                'verificacion': dict(conteo)}
-        acta_path = self.salida / f'acta_extraccion_{stamp}.json'
-        atomic_json(acta_path, acta)
-        print(f'Excel nuevo: {salida.name} | expedientes: {len(filas_exp)} | fotos: {len(filas_fotos)} | '
-              f"confirmadas: {sum(1 for f in filas_exp if f['Verificación'].startswith('Confirmada'))}")
-        print(salida); print(acta_path)
-        return salida, acta_path
-
     def exportar(self, doble_revision=False):
-        if self.excel is None:
-            raise ValueError('Este proyecto no tiene Excel de expedientes: usa exportar_extraccion() para crear el Excel nuevo.')
         """Escribe las fechas aprobadas en una copia del Excel y deja constancia.
 
         doble_revision: False exporta toda aprobación válida; 'no_alta' exige dos revisores
