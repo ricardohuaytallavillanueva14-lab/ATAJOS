@@ -431,6 +431,34 @@ def parecido(texto, objetivo, umbral=0.65, prefijo=4):
     return r if r >= umbral else 0.0
 
 
+def parecido_rotulo(texto, inicio, otro):
+    """Puntuación de un rótulo 'FECHA DE NOTIFICACIÓN' u 'HORA DE NOTIFICACIÓN' leído con errores.
+
+    inicio: primera palabra esperada ('fecha' u 'hora'); otro: la del rótulo contrario.
+    Acepta: inicio reconocible (mismas 4 letras o similitud >= 0,6) con similitud global
+    >= 0,65 y una cola parecida a NOTIFICACION (>= 0,55); o, aunque falle el inicio, una
+    cola muy parecida a NOTIFICACION (>= 0,65), con puntuación menor por ser ambigua.
+    Rechaza lo que empieza como el rótulo contrario y los rótulos de otras fechas
+    (emisión, vencimiento), cuya cola no se parece a NOTIFICACION.
+    """
+    import difflib
+    t = norm(texto)
+    if not t:
+        return 0.0
+    R = lambda a, b: difflib.SequenceMatcher(None, a, b).ratio()
+    inicio_ok = t[:4] == inicio[:4] or R(t[:len(inicio)], inicio) >= 0.6
+    otro_ok = t[:4] == otro[:4] or R(t[:len(otro)], otro) >= 0.75
+    if otro_ok and not t[:4] == inicio[:4]:
+        return 0.0
+    cola = max([R(t[-n:], 'notificacion') for n in range(10, 15) if len(t) >= n] or [R(t, 'notificacion')])
+    global_r = R(t, inicio + 'denotificacion')
+    if inicio_ok and global_r >= 0.65 and cola >= 0.55:
+        return global_r
+    if not inicio_ok and cola >= 0.65:
+        return 0.5 + cola / 10  # ambiguo: solo la palabra NOTIFICACION
+    return 0.0
+
+
 def agrupar_lineas(rows, tolerancia=0.6):
     """Une detecciones que están en la misma línea (p. ej. 'FECHA DE' + 'NOTIFICACIÓN:')."""
     items = []
@@ -463,15 +491,21 @@ def localizar_recuadro_fecha(rows, ancho, alto):
     3. Solo rótulo HORA: casilla justo encima, de la misma altura que la de HORA.
     """
     lineas = agrupar_lineas(rows)
-    fechas = sorted(((parecido(l['text'], 'fechadenotificacion'), l) for l in lineas), key=lambda t: -t[0])
-    horas = sorted(((parecido(l['text'], 'horadenotificacion'), l) for l in lineas), key=lambda t: -t[0])
+    fechas = sorted(((parecido_rotulo(l['text'], 'fecha', 'hora'), l) for l in lineas), key=lambda t: -t[0])
+    horas = sorted(((parecido_rotulo(l['text'], 'hora', 'fecha'), l) for l in lineas), key=lambda t: -t[0])
     fecha = fechas[0][1] if fechas and fechas[0][0] > 0 else None
+    fecha_ambigua = fecha is not None and fechas[0][0] < 0.65
     hora = None
     for score, l in horas:
         if score <= 0:
             break
+        if l is fecha:
+            continue
         if fecha is None or (l['y1'] > fecha['y2'] and abs(l['x1'] - fecha['x1']) < 0.25 * ancho):
             hora = l; break
+    if fecha_ambigua and hora is None:
+        # Solo se leyó 'NOTIFICACION' suelto: puede ser el rótulo de FECHA o el de HORA.
+        return None, 'Rótulo ambiguo (solo se reconoció NOTIFICACIÓN, sin FECHA/HORA ni rótulo HORA debajo).'
     if fecha is None and hora is None:
         return None, 'No se localizó ningún rótulo FECHA/HORA DE NOTIFICACIÓN.'
     if fecha is not None:

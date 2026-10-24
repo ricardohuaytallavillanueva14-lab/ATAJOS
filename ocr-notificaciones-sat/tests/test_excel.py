@@ -345,6 +345,33 @@ class LocalizacionTests(unittest.TestCase):
         # 'HORA DE NOTIFICACION' no debe aceptarse como rótulo FECHA aunque se parezca.
         roi,metodo=c.localizar_recuadro_fecha([caja(1000,1990,1500,2020,'HORA DE NOTIFICACION')],self.W,self.H)
         self.assertEqual(metodo,'rotulo_hora')
+    def test_inicio_mal_leido_y_rotulos_de_otras_fechas(self):
+        # Inicio mal leído pero NOTIFICACION reconocible.
+        rows=[caja(1000,1900,1500,1930,'PECHA DE NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
+        roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
+        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1930,1990))
+        # Solo la palabra NOTIFICACION, con el rótulo HORA debajo: se acepta.
+        rows=[caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
+        roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
+        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1930,1990))
+        # Dos rótulos leídos solo como NOTIFICACION: el de arriba es FECHA y el de abajo HORA.
+        rows=[caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'NOTIFICACION:')]
+        roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
+        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1930,1990))
+        # NOTIFICACION suelto y nada más: ambiguo, no se recorta.
+        roi,metodo=c.localizar_recuadro_fecha([caja(1000,1900,1500,1930,'NOTIFICACION:')],self.W,self.H)
+        self.assertIsNone(roi); self.assertIn('ambiguo',metodo)
+        # Rótulos de otras fechas no se aceptan como ancla.
+        for texto in ('FECHA DE EMISION','FECHA DE VENCIMIENTO','FECHA DE EMISION REC','FECHA DE EMISION:','FECHA Y HORA','FECHA:'):
+            with self.subTest(texto=texto):
+                self.assertEqual(c.parecido_rotulo(texto,'fecha','hora'),0.0)
+                self.assertIsNone(c.localizar_recuadro_fecha([caja(1000,1900,1500,1930,texto)],self.W,self.H)[0])
+        # Positivos del informe de campo y negativos cruzados.
+        self.assertGreater(c.parecido_rotulo('FECHA DE HotECACLON:','fecha','hora'),0.65)
+        self.assertGreater(c.parecido_rotulo('HORADENOIIECACKN:','hora','fecha'),0.65)
+        self.assertEqual(c.parecido_rotulo('HORA DE NOTIFICACION','fecha','hora'),0.0)
+        self.assertEqual(c.parecido_rotulo('FECHA DE NOTIFICACION','hora','fecha'),0.0)
+        self.assertEqual(c.parecido_rotulo('HORADENOIIECACKN:','fecha','hora'),0.0)
     def test_acta_negativa_y_clasificacion(self):
         rows=[caja(100,1700,900,1730,'Siendo las 9:00 horas, del dia 11/09/2026 , quien suscribe'),
               caja(1000,1900,1500,1930,'FECHA DE NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
