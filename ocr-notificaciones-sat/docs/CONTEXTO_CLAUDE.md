@@ -15,7 +15,7 @@ Supervisa `REC_2026_02_SEPTIEMBRE_Colab.ipynb`. El objetivo es leer las 3.996 fo
 - Actas: `acta_exportacion_*.json` con huellas del original y de cada copia generada.
 - Exportaciones: `expedientes_actualizados_*.xlsx` y `revision_*.csv`.
 
-El original esperado es el XLSX adjuntado cuyo nombre termina en `(1).xlsx`. Su SHA-256 se comprueba en la celda 2; abrirlo y volver a guardarlo puede cambiar esa huella aunque sus valores parezcan iguales.
+El Excel de trabajo es el archivo guardado en Drive cuya huella SHA-256 figura en `EXCEL_SHA_ESPERADO` (celda 2). La celda 2 lo copia a `entrada/original_expedientes.xlsx` y comprueba esa huella; abrirlo y volver a guardarlo en Excel la cambia aunque los valores parezcan iguales. No se usa ninguna otra copia del Excel. No guardes identificadores de Drive ni datos de contribuyentes en el repositorio.
 
 ## Funcionamiento
 
@@ -45,4 +45,4 @@ El usuario autorizó reconectar y ejecutar 1, 2 y 4 en orden, incluyendo una rec
 
 Si falla, informa celda, error exacto, avance recuperado y acción propuesta. Distingue fallo de conexión, de instalación, de descarga de modelos, de lectura de imagen y falta de memoria. Si pierdes acceso a la pestaña, dilo: no afirmes supervisión continua sin acceso.
 
-En el último reporte del usuario la celda 1 había encontrado 3.996 fotos sin diferencias y T4, pero la pestaña quedó en Conectando/Reanudando la ejecución. Este es un antecedente, no el estado actual: hay que comprobar los registros y las celdas al reconectar. No se ha confirmado desde este proyecto que el OCR completo haya terminado ni su tasa de precisión.
+Estado conocido (24/10/2026): entorno Colab Pro con GPU T4 y Python 3.13; torch 2.11, paddlepaddle 3.2.0, paddleocr 3.3.2, transformers 4.57.6. La celda 2 funcionó: 3.996 fotos, 3.581 contenidos únicos, 415 copias idénticas, 10.701 expedientes indexados en la hoja 2026. PaddleOCR 3.2.0 se cae (segmentation fault) al inferir en ese entorno; EasyOCR en GPU funciona, por eso `MOTOR = auto` lo elige tras probar Paddle en un subproceso. La versión actual del cuaderno todavía no se ha ejecutado sobre fotos reales: ni la localización del recuadro, ni los lectores manuscritos, ni el acierto del piloto están medidos. No se ha confirmado que el OCR completo haya terminado ni su tasa de precisión.

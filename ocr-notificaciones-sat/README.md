@@ -2,7 +2,9 @@
 
 Extractor de datos de páginas escaneadas pensado para **Google Colab**. Lee fotografías de notificaciones (REC) guardadas en Google Drive, propone con OCR gratuito el expediente, el código SIGETI, la resolución y la **fecha manuscrita de notificación**, y, tras un cotejo visual obligatorio, escribe esa fecha en una **copia** del Excel de expedientes. El original nunca se modifica.
 
-[![Abrir en Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ricardohuaytallavillanueva14-lab/ATAJOS/blob/main/ocr-notificaciones-sat/notebooks/REC_2026_02_SEPTIEMBRE_Colab.ipynb)
+[![Abrir en Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ricardohuaytallavillanueva14-lab/ATAJOS/blob/claude/hola-dec1ew/ocr-notificaciones-sat/notebooks/REC_2026_02_SEPTIEMBRE_Colab.ipynb)
+
+El botón abre el cuaderno de la rama `claude/hola-dec1ew`, donde vive el proyecto; en `main` todavía no existe. Cuando la rama se fusione, cambia `claude/hola-dec1ew` por `main` en este enlace y en el README de la raíz.
 
 ## Cómo funciona
 
@@ -25,6 +27,8 @@ Alcance por defecto: hoja `2026`, filas con columna E (emisión REC) = `02/09/20
 3. Rellena los formularios de cada celda (rutas de Drive, cantidad de fotos, hoja, fecha de emisión) y ejecútalas en orden.
 4. Tras la celda 3, mira los segundos por foto y la estimación de horas. Si supera tu sesión de Colab, usa `LIMITE` en la celda 4 para avanzar por lotes o activa `MODO_RAPIDO`.
 5. Revisa en la celda 5 y exporta en la 6 tantas veces como necesites.
+
+El Excel de trabajo es el archivo guardado en Drive cuya huella SHA-256 está en `EXCEL_SHA_ESPERADO` (celda 2); la celda lo copia a `entrada/` y comprueba la huella. Si usas otro lote, cambia o vacía ese valor.
 
 Rutas por defecto en Drive:
 
