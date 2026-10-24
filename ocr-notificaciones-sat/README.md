@@ -1,5 +1,7 @@
 # OCR Notificaciones SAT
 
+**Modo actual (sin Excel de entrada):** el cuaderno lee las fotografías y crea un **Excel nuevo** (`extraccion_*.xlsx`) con una fila por expediente y solo los datos importantes: expediente, nombre y apellidos, código de contribuyente, fecha de emisión y fecha de notificación manuscrita, más verificación, confianza y alertas. El modo con Excel de expedientes (validar contra sus filas y completar la columna F en una copia) sigue disponible con `USAR_EXCEL = True`.
+
 Extractor de datos de páginas escaneadas pensado para **Google Colab**. Lee fotografías de notificaciones (REC) guardadas en Google Drive, propone con OCR gratuito el expediente, el código SIGETI, la resolución y la **fecha manuscrita de notificación**, y, tras un cotejo visual obligatorio, escribe esa fecha en una **copia** del Excel de expedientes. El original nunca se modifica.
 
 [![Abrir en Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ricardohuaytallavillanueva14-lab/ATAJOS/blob/claude/hola-dec1ew/ocr-notificaciones-sat/notebooks/REC_2026_02_SEPTIEMBRE_Colab.ipynb)
@@ -30,10 +32,18 @@ El sondeo de formato (celda 3, `SONDEO_FORMATO`) recorre todas las fotos sin OCR
 | 3 · Prueba con muestra | Procesa ~20 fotos repartidas por carpetas y estima el tiempo total. |
 | 4 · Procesamiento | Tres lectores independientes (PaddleOCR PP-OCRv5, TrOCR manuscrito y Qwen2.5-VL) sobre el recuadro de fecha, con tinta azul aislada, nivel de confianza y alertas. |
 | 5 · Revisión | Muestra encabezado, cargo, recorte de la fecha y manuscrito aislado; el revisor corrige y confirma. Modo de segunda revisión. |
-| 6 · Exportación | Copia del XLSX con las fechas confirmadas, informe CSV y acta de exportación con huellas SHA-256. |
+| 6 · Exportación | Excel nuevo con los datos importantes (hojas Expedientes, Fotos y Resumen) y acta con su huella SHA-256. Con Excel de expedientes, además la copia con F completada, el CSV y su acta. |
 | 7 · Opcional | ZIP con casos pendientes para una segunda revisión externa. |
 
 Alcance por defecto: hoja `2026`, filas con columna E (emisión REC) = `02/09/2026` y columna F (notificación REC) vacía. Ambos valores se cambian en la celda 2 y quedan registrados en `proyecto.json` de la carpeta de resultados, de modo que una carpeta no se mezcla con otro Excel ni otro lote.
+
+## Excel nuevo (`exportar_extraccion`)
+
+- **Hoja Expedientes**: una fila por expediente del lote. Columnas: Expediente, Nombre y apellidos, Código contribuyente, Fecha emisión, Fecha notificación, Resolución, Verificación («Confirmada por …», «Propuesta OCR sin verificar», «Pendiente», «CONFLICTO: fotos con fechas distintas»), Revisor(es), Confirmada el, Confianza OCR, Alertas, Problemas, Fotos, Archivo(s), Huella SHA-256. Si un expediente tiene varias fotos, prevalece la confirmada; si las fechas no coinciden, la celda queda vacía y se marca CONFLICTO.
+- **Hoja Fotos**: una fila por foto única, con la misma información más el tipo de documento y la hora de lectura. Incluye anexos, errores y documentos de otros lotes.
+- **Hoja Resumen**: cantidades por tipo de verificación.
+- `SOLO_CONFIRMADAS` deja en Expedientes solo las filas con cotejo humano; `FILTRAR_POR_EMISION` excluye los documentos cuya emisión impresa no es la del lote. Las fechas son celdas de fecha con formato dd/mm/yyyy.
+- Sin Excel de entrada, el lote se delimita por el año del expediente y la fecha de emisión impresa en cada REC; no hay validación contra la columna K ni medición de acierto contra F, por eso el cotejo visual de la celda 5 sigue siendo la garantía.
 
 ## Uso en Colab
 

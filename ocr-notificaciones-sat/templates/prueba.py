@@ -10,7 +10,8 @@ ORIENTACION_AUTO = False  # @param {type:"boolean"}
 # Procesa una muestra repartida entre carpetas para medir velocidad y calidad de lectura.
 # MOTOR auto prueba PaddleOCR en un subproceso y, si se cae (Python 3.13), usa EasyOCR en GPU.
 # PADDLE_GPU requiere paddlepaddle-gpu; si no está disponible, vuelve a CPU automáticamente.
-# Con unas 200 fotos, parte corresponderá a filas que ya tienen F: sirven de patrón para medir el acierto real.
+# Con USAR_EXCEL, parte de las 200 fotos corresponderá a filas que ya tienen F y sirven para medir el acierto real.
+# Sin Excel, el piloto mide velocidad, confianza y estructura; el acierto se comprueba en la revisión (celda 5).
 # SONDEO_FORMATO recorre todas las fotos sin OCR (orientación, tamaño, carpeta) y guarda sondeo_formato_*.json.
 # El acierto de ALTA solo es concluyente con al menos 30 casos ALTA con referencia; el resumen se guarda en piloto_*.json.
 # MODO_RAPIDO usa el detector PP-OCRv5 mobile: más rápido en CPU, algo menos preciso.

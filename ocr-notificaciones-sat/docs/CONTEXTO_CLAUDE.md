@@ -1,6 +1,6 @@
 # Contexto para supervisión de Colab
 
-Supervisa `REC_2026_02_SEPTIEMBRE_Colab.ipynb`. El objetivo es leer las 3.996 fotos y, tras cotejo visual, completar F vacía únicamente en la hoja 2026 cuando E sea 02/09/2026.
+Supervisa `REC_2026_02_SEPTIEMBRE_Colab.ipynb`. El objetivo es leer las 3.996 fotos y entregar un Excel nuevo (`extraccion_*.xlsx`) con expediente, nombre y apellidos, código de contribuyente, fecha de emisión y fecha de notificación manuscrita, con cotejo visual. Desde el 24/10/2026 el usuario ya no necesita el Excel de expedientes (`USAR_EXCEL = False`); el modo que completa F en una copia sigue disponible.
 
 ## Ubicaciones
 
