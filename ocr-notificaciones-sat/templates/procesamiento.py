@@ -21,6 +21,9 @@ if pendientes:
     resumen = proyecto.procesar(motor, limite=LIMITE or len(pendientes), reintentar_errores=REINTENTAR_ERRORES)
 else:
     print('No hay lecturas nuevas pendientes; se conservan los avances.')
+# Estructura de los documentos leídos y conciliación Excel-fotos por expediente.
+estructura = proyecto.sondeo_estructura()
+conciliacion = proyecto.conciliar()
 # Genera un informe aun si todavía no se ha aprobado ninguna fecha.
 proyecto.exportar()
 print('Las propuestas OCR requieren cotejo visual. Continúa con la celda 5.')

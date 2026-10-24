@@ -21,7 +21,7 @@ El Excel de trabajo es el archivo guardado en Drive cuya huella SHA-256 figura e
 
 1. Preparación: montaje de Drive, verificación de las fotos (`FOTOS_ESPERADAS`, 0 = sin comprobar) y del inventario XLSX si existe, instalación solo de lo que falta, caché de modelos en Drive.
 2. Proyecto: carga de código, `configurar(HOJA_LOTE, FECHA_EMISION_LOTE)`, Excel desde Drive o subido, índice e inventario (reutiliza la caché de huellas).
-3. Prueba: muestra de `MUESTRA` fotos repartidas por carpetas; informa segundos por foto y horas estimadas.
+3. Sondeo y piloto: `sondeo_formato()` sobre todas las fotos sin OCR; muestra de `MUESTRA` fotos con acierto contra F registrada, `sondeo_estructura()` (campos clave: expediente, nombre, código, emisión impresa, fecha manuscrita) y `conciliar()` (filas con E = lote frente a fotos por expediente). Informes en JSON en la carpeta de resultados.
 4. Procesamiento: PaddleOCR + TrOCR + Qwen2.5-VL (`LECTOR_VLM`) sobre el recuadro de fecha con tinta azul aislada; confianza ALTA/MEDIA/CONTRADICTORIA/SIN_FECHA y alertas. Todos los registros NUEVOS (o hasta `LIMITE`). `REINTENTAR_ERRORES` controla los errores anteriores. Guarda cada lectura y llama al exportador; si ya había aprobaciones recuperadas, puede producir una copia actualizada.
 5. Revisión: muestra imagen, recortes, lecturas y campos; requiere nombre del revisor, cotejo y confirmación. `MODO = segunda` para el segundo revisor; la misma persona no puede firmar dos veces los mismos datos.
 6. Exportación: revalida todas las aprobaciones, aplica `DOBLE_REVISION` (ninguna, no_alta, todas) y genera copia, CSV y acta JSON.

@@ -87,8 +87,9 @@ class MotorFalso:
     def leer(self,src):
         self.vistas+=1
         with Image.open(src) as im: im.load()
-        return dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',fecha_notificacion='15/09/2026',
-                    fecha_emision='02/09/2026',fecha_texto=None,observaciones=''),{'motor':self.nombre}
+        return dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',nombre='PERSONA FICTICIA',fecha_notificacion='15/09/2026',
+                    fecha_emision='02/09/2026',fecha_texto=None,observaciones=''),{'motor':self.nombre,'tipo':'REC','roi_fecha':[0.5,0.7,0.7,0.75],
+                    'orientacion':'vertical','metodo_recuadro':'rotulos_fecha_y_hora'}
 
 class ProyectoBase(unittest.TestCase):
     def setUp(self):
@@ -254,13 +255,13 @@ class FiabilidadTests(unittest.TestCase):
         try:
             c.configurar(ventana_dias=30)
             t={'emision':'2026-09-02'}
-            self.assertEqual(c.alertas({'fecha_notificacion':'15/09/2026','resolucion':'UNO'},t),[])
+            self.assertEqual(c.alertas({'fecha_notificacion':'15/09/2026','resolucion':'UNO','fecha_emision':'02/09/2026'},t),[])
             self.assertTrue(any('resoluci' in a for a in c.alertas({'fecha_notificacion':'15/09/2026'},t)))
-            avisos=c.alertas({'fecha_notificacion':'15/12/2026','resolucion':'UNO'},t)
+            avisos=c.alertas({'fecha_notificacion':'15/12/2026','resolucion':'UNO','fecha_emision':'02/09/2026'},t)
             self.assertEqual(len(avisos),1); self.assertIn('104 días',avisos[0])
-            self.assertTrue(any('domingo' in a for a in c.alertas({'fecha_notificacion':'06/09/2026','resolucion':'UNO'},t)))
+            self.assertTrue(any('domingo' in a for a in c.alertas({'fecha_notificacion':'06/09/2026','resolucion':'UNO','fecha_emision':'02/09/2026'},t)))
             # Cruce con la fecha del acta: solo alerta, nunca cambia la confianza.
-            d={'fecha_notificacion':'22/09/2026','resolucion':'UNO'}
+            d={'fecha_notificacion':'22/09/2026','resolucion':'UNO','fecha_emision':'02/09/2026'}
             self.assertEqual(c.alertas(d,t,{'fecha_acta':['2026-09-22']}),[])
             av=c.alertas(d,t,{'fecha_acta':['2026-09-21']})
             self.assertEqual(len(av),1); self.assertIn('21/09/2026',av[0]); self.assertIn('DOMICILIO CERRADO',av[0])
@@ -399,6 +400,29 @@ class LocalizacionTests(unittest.TestCase):
         self.assertEqual(c.clasificar_documento('AVISO PREVIO DE NOTIFICACION',[],3307,2330,None),'ANEXO')
         self.assertEqual(c.clasificar_documento('CEDULON',[],3307,2330,None),'ANEXO')
         self.assertEqual(c.clasificar_documento('nada',[],self.W,self.H,None),'DESCONOCIDO')
+    def test_nombre_y_emision_impresa(self):
+        txt=('SERVICIO DE ADMINISTRACION TRIBUTARIA\nEXPEDIENTE COACTIVO : 16-012-000000001-2026-SAT-H/DCC-IPA\n'
+             'OBLIGADO (A) : JUANA FICTICIA PEREZ Y PEDRO FICTICIO LOPEZ\nDOMICILIO FISCAL : ASOC. EJEMPLO\n'
+             'CODIGO CONTRIBUYENTE: 000000000123\nResolución N° UNO\nAyacucho, 02 de setiembre de 2026')
+        self.assertEqual(c.parse_header_extra(txt),('JUANA FICTICIA PEREZ Y PEDRO FICTICIO LOPEZ','2026-09-02'))
+        # Rótulo mal leído, nombre pegado al siguiente rótulo y mes con errores de OCR.
+        self.assertEqual(c.parse_header_extra('OBLlGADO (A): MARIA FICTICIA QUISPE DOMICILIO FISCAL: X\nAyacucho, 02 de septiernbre de 2026'),
+                         ('MARIA FICTICIA QUISPE','2026-09-02'))
+        self.assertEqual(c.fecha_en_letras('AYACUCHO, 2 DE OCTUBRE DEL 2026'),'2026-10-02')
+        self.assertIsNone(c.fecha_en_letras('2 DE XXXXXX DE 2026')); self.assertIsNone(c.fecha_en_letras('sin fecha'))
+        self.assertEqual(c.parse_header_extra('texto sin campos'),(None,None))
+        # Similitud de nombres por palabras, tolerante al orden y a un segundo obligado.
+        self.assertGreaterEqual(c.similitud_nombres('JUANA FICTICIA PEREZ Y PEDRO FICTICIO LOPEZ','PEREZ JUANA FICTICIA'),0.5)
+        self.assertEqual(c.similitud_nombres('JUANA PEREZ','CARLOS RAMOS'),0.0)
+        # La emisión impresa distinta de la columna E bloquea; el nombre distinto solo alerta.
+        src=Path(tempfile.mkdtemp())/'o.xlsx'; libro_ficticio(src); index,_,_=c.build_index(src,('2026',))
+        d=dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',nombre='PERSONA FICTICIA',fecha_notificacion='15/09/2026',fecha_emision='03/09/2026')
+        target,issues=c.evaluar(d,index); self.assertTrue(any('emisión impresa' in i for i in issues))
+        d['fecha_emision']='02/09/2026'; target,issues=c.evaluar(d,index); self.assertEqual(issues,[])
+        self.assertEqual(c.alertas(d,target),[])
+        d['nombre']='OTRO NOMBRE DISTINTO'; self.assertTrue(any('nombre leído' in a for a in c.alertas(d,target)))
+        d['nombre']=None; d['fecha_emision']=None
+        self.assertTrue(any('emisión impresa' in a for a in c.alertas(d,target)))
     def test_parse_header_resolucion_tolerante(self):
         exp,code,res=c.parse_header('EXPEDIENTE COACTIVO : 16-012-000000001-2026-SAT-H/DCC-IPA\nCODIGO CONTRIBUYENTE: 000000000123\nResoluci6n N° UNO')
         self.assertEqual((exp,code,res),('16-012-000000001-2026-SAT-H/DCC-IPA','123','UNO'))
@@ -452,6 +476,31 @@ class EmparejamientoTests(ProyectoBase):
         guardado=json.loads(Path(res['archivo']).read_text(encoding='utf-8'))
         self.assertEqual(guardado['tabla']['TOTAL']['total'],2); self.assertTrue(Path(res['archivo']).name.startswith('piloto_'))
         self.assertIn('tipos',guardado); self.assertIn('confianza_muestra',guardado)
+    def test_sondeos_y_conciliacion(self):
+        p=self.proyecto()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            p.inventario(); fmt=p.sondeo_formato()
+        self.assertEqual(fmt['fotos'],4); self.assertEqual(fmt['por_tamano'],{'40x30':4}); self.assertEqual(fmt['errores'],[])
+        self.assertEqual(fmt['por_categoria_y_orientacion'],{'OTRA horizontal':4}); self.assertTrue(Path(fmt['archivo']).exists())
+        self.assertEqual(c.Proyecto.categoria_carpeta('RECs/REC PARA/REC/NEGATIVA/Imagen (1).jpg'),'NEGATIVA')
+        self.assertEqual(c.Proyecto.categoria_carpeta('X/DOMICILIO CERRADO/a.jpg'),'DOMICILIO_CERRADO')
+        self.assertEqual(c.Proyecto.categoria_carpeta('X/AVISO PREVIO/a.jpg'),'AVISO_PREVIO')
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            antes=p.conciliar(guardar=False)
+        self.assertEqual((antes['filas_en_alcance'],antes['filas_f_vacia'],antes['fotos_archivos'],antes['fotos_unicas'],antes['fotos_no_leidas']),(3,1,4,3,3))
+        self.assertIn('parcial',out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.procesar(MotorFalso(),limite=10); est=p.sondeo_estructura(); con=p.conciliar()
+        self.assertEqual(est['fotos_leidas'],3); self.assertEqual(est['estructura_completa'],3); self.assertEqual(est['por_tipo'],{'REC':3})
+        self.assertEqual(est['campos_encontrados']['fecha_notificacion'],3); self.assertTrue(Path(est['archivo']).exists())
+        self.assertEqual((con['filas_con_foto'],con['filas_sin_foto'],con['filas_con_varias_fotos'],con['expedientes_fuera_del_lote'],con['fotos_sin_expediente'],con['fotos_no_leidas']),(1,2,1,0,0,0))
+        self.assertEqual([x['celda'] for x in con['detalle']['filas_sin_foto']],['F4','F5'])
+        self.assertEqual(json.loads(Path(con['archivo']).read_text(encoding='utf-8'))['filas_en_alcance'],3)
+        # Un expediente leído que no está en el lote se reporta como fuera del lote.
+        k=sorted(p.active)[0]; p.records[k]['lectura']['expediente']='16-012-2-2026'
+        with contextlib.redirect_stdout(io.StringIO()):
+            con=p.conciliar(guardar=False)
+        self.assertEqual(con['expedientes_fuera_del_lote'],1)
 
 class NotebookTests(unittest.TestCase):
     def setUp(self):

@@ -149,7 +149,28 @@ def alertas(data, target=None, evidencia=None):
         avisos.append('La fecha cae en domingo; confirma el día en la foto.')
     if (data or {}).get('resolucion') in (None, ''):
         avisos.append('No se leyó el número de resolución; confirma en la foto que es la REC UNO.')
+    if (data or {}).get('fecha_emision') in (None, ''):
+        avisos.append('No se leyó la fecha de emisión impresa; confirma en la foto que la REC es del lote.')
+    nombre_doc = (data or {}).get('nombre'); nombre_fila = (target or {}).get('nombre')
+    if nombre_doc and nombre_fila and similitud_nombres(nombre_doc, nombre_fila) < 0.5:
+        avisos.append(f'El nombre leído ({nombre_doc[:60]}) no se parece al de la fila ({str(nombre_fila)[:60]}). Confirma que la foto corresponde a esa fila.')
     return avisos
+
+
+def similitud_nombres(a, b):
+    """Similitud entre nombres (0-1) tolerante al orden y a apellidos compuestos: comparación de palabras."""
+    import difflib
+    pa = sorted(set(re.findall(r'[a-z]{2,}', norm_texto(a)))); pb = sorted(set(re.findall(r'[a-z]{2,}', norm_texto(b))))
+    if not pa or not pb:
+        return 0.0
+    comunes = sum(1 for w in pa if any(difflib.SequenceMatcher(None, w, v).ratio() >= 0.85 for v in pb))
+    return comunes / min(len(pa), len(pb))
+
+
+def norm_texto(value):
+    """Minúsculas sin tildes, conservando espacios (para comparar nombres por palabras)."""
+    s = unicodedata.normalize('NFKD', str(value or ''))
+    return re.sub(r'[^a-z0-9 ]', ' ', ''.join(c for c in s if not unicodedata.combining(c)).lower())
 
 
 def _progreso(iterable, total, desc):
@@ -272,7 +293,7 @@ def build_index(excel, hojas):
 def normalizar_lectura(data):
     if not isinstance(data, dict):
         raise ValueError('La respuesta no es un objeto JSON.')
-    fields = ['expediente','codigo','resolucion','fecha_notificacion','fecha_emision','fecha_texto','observaciones']
+    fields = ['expediente','codigo','resolucion','nombre','fecha_notificacion','fecha_emision','fecha_texto','observaciones']
     out = {}
     for field in fields:
         v = data.get(field)
@@ -298,6 +319,9 @@ def evaluar(data, index):
                 issues.append('La notificación ya está registrada. Se conserva sin modificar.')
             if not codigo(data.get('codigo')) or codigo(data.get('codigo')) != target['codigo']:
                 issues.append('El código del contribuyente no coincide con el Excel o no se puede leer.')
+            em_doc = fecha(data.get('fecha_emision'))
+            if em_doc and fecha(target['emision']) and em_doc != fecha(target['emision']):
+                issues.append(f"La fecha de emisión impresa en el documento ({em_doc:%d/%m/%Y}) no coincide con la columna E de la fila ({fecha(target['emision']):%d/%m/%Y}).")
     if data.get('resolucion') not in (None, '') and norm(data.get('resolucion')) not in {'uno','1','01','resolucionnuno','resolucionuno'}:
         issues.append('Esta versión solo llena la notificación de la REC UNO. Otra resolución requiere revisión aparte.')
     d = fecha(data.get('fecha_notificacion'))
@@ -333,6 +357,47 @@ def parse_header(text):
                     if sig in ('UNO','DOS','TRES') or sig.isdigit():
                         resolution.append(sig); break
     return exp,code,resolution[0] if len(set(resolution))==1 else None
+
+MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','setiembre','octubre','noviembre','diciembre']
+
+
+def fecha_en_letras(text):
+    """'Ayacucho, 02 de setiembre de 2026' -> '2026-09-02'. Tolera 'septiembre' y meses mal leídos (similitud >= 0,75)."""
+    import difflib
+    for d, mes, y in re.findall(r'(?<!\d)(\d{1,2})\s+DE\s+([A-ZÁÉÍÓÚÑ]{3,12})\s+DE[LE]?\s+(20\d{2})', str(text or '').upper()):
+        m = norm(mes).replace('septiembre', 'setiembre')
+        candidatos = [(difflib.SequenceMatcher(None, m, nombre).ratio(), i + 1) for i, nombre in enumerate(MESES)]
+        ratio, numero = max(candidatos)
+        if ratio >= 0.75:
+            f = _fecha_iso(d, numero, y)
+            if f:
+                return f
+    return None
+
+
+def parse_header_extra(text):
+    """Nombre del obligado y fecha de emisión impresa del encabezado de la REC.
+
+    El nombre sale de la línea 'OBLIGADO (A) : ...'; la fecha, de 'Ayacucho, 02 de setiembre de 2026'
+    o de una fecha numérica en una línea que mencione emisión. Devuelve (nombre, fecha_iso).
+    """
+    nombre = None
+    emision = None
+    for linea in str(text or '').splitlines():
+        u = linea.upper()
+        m = re.search(r'OBL[I1L]GAD[O0]\s*\(?\s*A?\s*\)?\s*[:.;]?\s*(.+)$', u)
+        if m and nombre is None:
+            valor = re.sub(r'\s+', ' ', m.group(1)).strip(' :.;-')
+            valor = re.split(r'\s+(?:DOMICILIO|MATERIA|AUXILIAR|C[ÓO]DIGO)\b', valor)[0].strip()
+            if len(valor) >= 5 and re.search(r'[A-ZÁÉÍÓÚÑ]{2,}', valor):
+                nombre = valor
+        if emision is None:
+            emision = fecha_en_letras(u)
+            if emision is None and 'EMISI' in norm(u).upper():
+                ds = dates_in_text(u)
+                emision = ds[0] if len(ds) == 1 else None
+    return nombre, emision
+
 
 def _fecha_iso(day, month, year):
     try:
@@ -741,14 +806,15 @@ class MotorOCR:
         w, h = im.size
         escala = W / w
         head = self.read(im.crop((0, 0, w, int(h * .32))))
-        head_text = '\n'.join(r['text'] for r in head)
+        head_text = '\n'.join(l['text'] for l in agrupar_lineas(head))
         exp, code, res = parse_header(head_text)
+        nombre, emision_doc = parse_header_extra(head_text)
         offset = int(h * .50)
         foot = self.read(im.crop((0, offset, w, h)))
         foot_abs = [dict(r, box=[[x, y + offset] for x, y in r['box']]) for r in foot]
         tipo = clasificar_documento(head_text, foot_abs, w, h, exp)
-        data = dict(expediente=exp, codigo=code, resolucion=res, fecha_notificacion=None,
-                    fecha_emision=None, fecha_texto=None, observaciones='')
+        data = dict(expediente=exp, codigo=code, resolucion=res, nombre=nombre, fecha_notificacion=None,
+                    fecha_emision=emision_doc, fecha_texto=None, observaciones='')
         evidence = {'encabezado': head, 'pie': foot_abs, 'roi_fecha': None, 'variantes_fecha': [], 'tipo': tipo,
                     'orientacion': 'horizontal' if W > H else 'vertical', 'tamano': [W, H],
                     'motor': self.nombre, 'aviso': 'Puntuaciones OCR no calibradas; no son probabilidades de acierto.'}
@@ -1059,6 +1125,135 @@ class Proyecto:
             print(f'Medias páginas emparejadas: {nuevas}. Confírmalas en la revisión viendo ambas fotos.')
         return nuevas
 
+    CATEGORIAS = (('AVISO PREVIO', 'AVISO_PREVIO'), ('CEDULON', 'CEDULON'), ('CERRADO', 'DOMICILIO_CERRADO'),
+                  ('NEGATIVA', 'NEGATIVA'), ('FIRMA', 'FIRMA'))
+
+    @classmethod
+    def categoria_carpeta(cls, rel):
+        carpeta = norm(posixpath.dirname(rel)).upper()
+        for clave, nombre in cls.CATEGORIAS:
+            if norm(clave).upper() in carpeta:
+                return nombre
+        return 'OTRA'
+
+    def sondeo_formato(self, guardar=True):
+        """Recorre todas las fotos sin OCR: orientación, tamaño, formato y categoría de carpeta.
+
+        Sirve para saber si todos los documentos comparten la estructura esperada (REC vertical
+        de página completa) antes de leerlos. Solo lee la cabecera de cada archivo.
+        """
+        filas = []
+        paths = self.listar_fotos()
+        for p in _progreso(paths, len(paths), 'Sondeo'):
+            rel = p.relative_to(self.fotos).as_posix()
+            try:
+                with Image.open(p) as im:
+                    w, h = im.size; fmt = im.format
+                    orientacion_exif = im.getexif().get(0x0112, 1)
+                if orientacion_exif in (5, 6, 7, 8):
+                    w, h = h, w
+                fila = {'archivo': rel, 'ancho': w, 'alto': h, 'formato': fmt,
+                        'orientacion': 'horizontal' if w > h else 'vertical'}
+            except Exception as e:
+                fila = {'archivo': rel, 'ancho': None, 'alto': None, 'formato': 'ERROR', 'orientacion': 'ERROR', 'error': str(e)[:120]}
+            fila['categoria'] = self.categoria_carpeta(rel)
+            filas.append(fila)
+        res = {'generado_en': ahora(), 'fotos': len(filas),
+               'por_categoria_y_orientacion': {f'{k[0]} {k[1]}': v for k, v in sorted(Counter((f['categoria'], f['orientacion']) for f in filas).items())},
+               'por_tamano': {f'{f[0]}x{f[1]}': v for f, v in Counter((f['ancho'], f['alto']) for f in filas).most_common()},
+               'por_formato': dict(Counter(f['formato'] for f in filas)),
+               'errores': [f for f in filas if f['formato'] == 'ERROR'], 'detalle': filas}
+        print(f"Sondeo de formato: {len(filas)} fotos; vertical {sum(1 for f in filas if f['orientacion']=='vertical')}, "
+              f"horizontal {sum(1 for f in filas if f['orientacion']=='horizontal')}, errores {len(res['errores'])}.")
+        for k, v in res['por_categoria_y_orientacion'].items(): print(f'  {k:<32}{v:>6}')
+        print('  Tamaños más frecuentes:', ', '.join(f'{k}: {v}' for k, v in list(res['por_tamano'].items())[:8]))
+        if guardar:
+            ruta = self.salida / f"sondeo_formato_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            atomic_json(ruta, res); res['archivo'] = str(ruta); print('Guardado en', ruta)
+        return res
+
+    CAMPOS_CLAVE = ('expediente', 'nombre', 'codigo', 'fecha_emision', 'fecha_notificacion')
+
+    def sondeo_estructura(self, ids=None, guardar=True):
+        """Sobre fotos ya leídas: tipo de documento, campos clave encontrados y cómo se ubicó la fecha.
+
+        'Estructura completa' = REC con expediente, nombre, código y emisión leídos y recuadro de fecha localizado.
+        """
+        ids = [k for k in (ids if ids is not None else sorted(getattr(self, 'active', self.records))) if self.records[k].get('lectura') is not None]
+        filas = []
+        for k in ids:
+            r = self.records[k]; d = r.get('lectura') or {}; ev = r.get('evidencia_ocr') or {}
+            encontrados = {c: bool(d.get(c)) for c in self.CAMPOS_CLAVE}
+            filas.append({'archivo': r['archivos'][0], 'categoria': self.categoria_carpeta(r['archivos'][0]), 'tipo': r.get('tipo') or '-',
+                          'orientacion': ev.get('orientacion'), 'recuadro': ev.get('metodo_recuadro') or ('no' if ev.get('roi_fecha') is None else 'si'),
+                          'campos': encontrados, 'confianza': r.get('confianza'),
+                          'completa': r.get('tipo') == 'REC' and all(encontrados[c] for c in ('expediente', 'nombre', 'codigo', 'fecha_emision')) and ev.get('roi_fecha') is not None})
+        n = len(filas)
+        res = {'generado_en': ahora(), 'fotos_leidas': n,
+               'por_tipo': dict(Counter(f['tipo'] for f in filas)),
+               'por_categoria_y_tipo': {f'{k[0]} {k[1]}': v for k, v in sorted(Counter((f['categoria'], f['tipo']) for f in filas).items())},
+               'campos_encontrados': {c: sum(1 for f in filas if f['campos'][c]) for c in self.CAMPOS_CLAVE},
+               'recuadro_fecha': dict(Counter(f['recuadro'] for f in filas)),
+               'estructura_completa': sum(1 for f in filas if f['completa']),
+               'incompletas': [f for f in filas if not f['completa']], 'detalle': filas}
+        if n:
+            print(f'Sondeo de estructura sobre {n} fotos leídas. Estructura completa: {res["estructura_completa"]} ({100*res["estructura_completa"]/n:.0f}%).')
+            print('  Tipos:', res['por_tipo'])
+            print('  Campos encontrados:', ', '.join(f'{c} {v} ({100*v/n:.0f}%)' for c, v in res['campos_encontrados'].items()))
+            print('  Recuadro de fecha:', res['recuadro_fecha'])
+            for k, v in res['por_categoria_y_tipo'].items(): print(f'  {k:<40}{v:>6}')
+        else:
+            print('No hay fotos leídas todavía; ejecuta el piloto o el procesamiento.')
+        if guardar:
+            ruta = self.salida / f"sondeo_estructura_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            atomic_json(ruta, res); res['archivo'] = str(ruta); print('Guardado en', ruta)
+        return res
+
+    def conciliar(self, guardar=True):
+        """Filas del Excel en el alcance (hoja y E = lote) frente a las fotos, por expediente.
+
+        Antes del OCR solo compara cantidades; con las fotos leídas indica qué filas tienen foto,
+        cuáles no, qué fotos apuntan a expedientes fuera del lote y cuáles no traen expediente.
+        """
+        alcance = {k: items[0] for k, items in self.index.items() if len(items) == 1 and items[0]['hoja'] == HOJA and fecha(items[0]['emision']) == FECHA_EMISION}
+        activos = sorted(getattr(self, 'active', self.records))
+        por_exp = defaultdict(list)
+        sin_expediente, no_leidas, anexos = [], [], []
+        for k in activos:
+            r = self.records[k]
+            if r['estado'] == 'NUEVO':
+                no_leidas.append(k); continue
+            if r['estado'] == 'ANEXO':
+                anexos.append(k); continue
+            parsed = expediente((r.get('lectura') or {}).get('expediente'))
+            if parsed and parsed[1]:
+                por_exp[parsed].append(k)
+            else:
+                sin_expediente.append(k)
+        con_foto = sorted(k for k in alcance if k in por_exp)
+        sin_foto = [alcance[k] for k in sorted(alcance) if k not in por_exp]
+        fuera = {f'{k[0]}-{k[1]}': [self.records[i]['archivos'][0] for i in ids] for k, ids in sorted(por_exp.items()) if k not in alcance}
+        multiples = {f'{k[0]}-{k[1]}': [self.records[i]['archivos'][0] for i in por_exp[k]] for k in con_foto if len(por_exp[k]) > 1}
+        res = {'generado_en': ahora(), 'alcance': {'hoja': HOJA, 'fecha_emision': FECHA_EMISION.isoformat()},
+               'filas_en_alcance': len(alcance), 'filas_f_vacia': sum(1 for v in alcance.values() if v['fecha_actual'] in (None, '')),
+               'fotos_archivos': sum(len(self.records[k]['archivos']) for k in activos), 'fotos_unicas': len(activos),
+               'fotos_no_leidas': len(no_leidas), 'fotos_anexo': len(anexos), 'fotos_sin_expediente': len(sin_expediente),
+               'filas_con_foto': len(con_foto), 'filas_sin_foto': len(sin_foto),
+               'expedientes_fuera_del_lote': len(fuera), 'filas_con_varias_fotos': len(multiples),
+               'detalle': {'filas_sin_foto': [{'expediente': v['expediente'], 'celda': v['celda'], 'f_actual': v['fecha_actual']} for v in sin_foto],
+                           'fuera_del_lote': fuera, 'varias_fotos': multiples,
+                           'sin_expediente': [self.records[k]['archivos'][0] for k in sin_expediente]}}
+        print(f"Conciliación: {len(alcance)} filas con E = {FECHA_EMISION:%d/%m/%Y} en la hoja {HOJA} ({res['filas_f_vacia']} con F vacía) "
+              f"frente a {res['fotos_archivos']} fotos ({len(activos)} únicas).")
+        if no_leidas:
+            print(f'  Fotos aún no leídas: {len(no_leidas)}. La comparación por expediente es parcial hasta terminar el procesamiento.')
+        print(f"  Filas con foto: {len(con_foto)} | filas sin foto: {len(sin_foto)} | filas con varias fotos: {len(multiples)}")
+        print(f"  Fotos con expediente fuera del lote: {len(fuera)} expedientes | fotos sin expediente legible: {len(sin_expediente)} | anexos: {len(anexos)}")
+        if guardar:
+            ruta = self.salida / f"conciliacion_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            atomic_json(ruta, res); res['archivo'] = str(ruta); print('Guardado en', ruta)
+        return res
+
     def resumen_alcance(self):
         """Filas de la hoja dentro del alcance (E = fecha de emisión) con F vacía y con F llena."""
         vacias=llenas=0
@@ -1227,6 +1422,7 @@ class Proyecto:
         choice = W.Dropdown(options=[(etiqueta(k),k) for k in ids],layout=W.Layout(width='98%'))
         output, msg = W.Output(), W.Output()
         exp = W.Text(description='Expediente:',layout=W.Layout(width='98%'),style={'description_width':'140px'})
+        nom = W.Text(description='Nombre leído:',layout=W.Layout(width='98%'),style={'description_width':'140px'})
         code = W.Text(description='Código:',style={'description_width':'140px'})
         res = W.Text(description='Resolución:',style={'description_width':'140px'})
         dt = W.Text(description='Notificación:',placeholder='DD/MM/AAAA',style={'description_width':'140px'})
@@ -1273,6 +1469,7 @@ class Proyecto:
                 if data:
                     target,issues = evaluar(data,self.index)
                     print('Destino:',target)
+                    if target: print('Nombre en la fila del Excel:',target.get('nombre') or '-','| emisión impresa leída:',data.get('fecha_emision') or '-')
                     print('Confianza OCR:',r.get('confianza') or '-','| lectores que coinciden:',', '.join((r.get('evidencia_ocr') or {}).get('lectores_coinciden') or []) or 'ninguno')
                     for v in (r.get('evidencia_ocr') or {}).get('variantes_fecha') or []:
                         print(f"  {v['vista']:<12} -> {', '.join(v.get('fechas') or []) or 'sin fecha'} | texto: {str(v.get('texto'))[:60]}")
@@ -1289,7 +1486,7 @@ class Proyecto:
         def load(change=None):
             r = self.records[choice.value]
             d = (r['aprobacion']['datos'] if r.get('aprobacion') else r.get('lectura')) or {}
-            for widget,field in [(exp,'expediente'),(code,'codigo'),(res,'resolucion'),(dt,'fecha_notificacion'),(em,'fecha_emision')]:
+            for widget,field in [(exp,'expediente'),(nom,'nombre'),(code,'codigo'),(res,'resolucion'),(dt,'fecha_notificacion'),(em,'fecha_emision')]:
                 widget.value = d.get(field) or ''
             angle[0]=0; check.value=False; rec_uno.value=False
             with msg: clear_output()
@@ -1306,7 +1503,7 @@ class Proyecto:
                     if not check.value: raise ValueError('Marca la casilla después de cotejar la fotografía.')
                     r = self.records[choice.value]
                     d = dict(r.get('lectura') or {})
-                    d.update(expediente=exp.value,codigo=code.value,resolucion=res.value,
+                    d.update(expediente=exp.value,nombre=nom.value,codigo=code.value,resolucion=res.value,
                              fecha_notificacion=dt.value,fecha_emision=em.value)
                     self.aprobar(choice.value,d,who.value,verifico_rec_uno=rec_uno.value)
                     n=len({a['revisor'] for a in self.aprobaciones_vigentes(self.records[choice.value])})
@@ -1324,7 +1521,7 @@ class Proyecto:
             show_image()
         choice.observe(load,names='value'); approve.on_click(confirm); skip.on_click(postpone)
         next_btn.on_click(advance); rotate.on_click(turn); full.observe(lambda _:show_image(),names='value')
-        display(W.VBox([choice,full,rotate,output,exp,code,res,dt,em,who,check,rec_uno,W.HBox([approve,skip,next_btn]),msg]))
+        display(W.VBox([choice,full,rotate,output,exp,nom,code,res,dt,em,who,check,rec_uno,W.HBox([approve,skip,next_btn]),msg]))
         load()
 
     def exportar(self, doble_revision=False):
@@ -1349,6 +1546,7 @@ class Proyecto:
             revisores = sorted({x['revisor'] for x in vigentes})
             entry = {'id':rid,'archivos':' | '.join(r['archivos']),'estado':r['estado'],
                      'expediente':d.get('expediente'),'codigo':d.get('codigo'),'fecha':d.get('fecha_notificacion'),
+                     'nombre_doc':d.get('nombre') or '','nombre_excel':(target or {}).get('nombre') or '','emision_doc':d.get('fecha_emision') or '',
                      'hoja':target['hoja'] if target else '', 'celda':target['celda'] if target else '',
                      'revisor':' | '.join(revisores), 'revisiones':len(revisores),
                      'aprobado_en':a['fecha'] if a else '', 'confianza_ocr':r.get('confianza') or '','tipo':r.get('tipo') or '',
@@ -1379,7 +1577,7 @@ class Proyecto:
             for _,entry in items: entry['resultado']='INCLUIDO'
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
         report_path = self.salida/f'revision_{stamp}.csv'
-        columns = ['id','archivos','estado','tipo','expediente','codigo','fecha','hoja','celda','revisor','revisiones','aprobado_en',
+        columns = ['id','archivos','estado','tipo','expediente','codigo','fecha','nombre_doc','nombre_excel','emision_doc','hoja','celda','revisor','revisiones','aprobado_en',
                    'verifico_rec_uno','confianza_ocr','lectura_ocr','alertas','evidencia','resultado','detalle']
         def safe(v):
             s = str(v if v is not None else '')

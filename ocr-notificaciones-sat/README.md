@@ -6,6 +6,21 @@ Extractor de datos de páginas escaneadas pensado para **Google Colab**. Lee fot
 
 El botón abre el cuaderno de la rama `claude/hola-dec1ew`, donde vive el proyecto; en `main` todavía no existe. Cuando la rama se fusione, cambia `claude/hola-dec1ew` por `main` en este enlace y en el README de la raíz.
 
+## Qué extrae de cada fotografía
+
+Solo los campos necesarios para relacionar la foto con su fila y completar F. Todo lo demás del documento se ignora.
+
+| Campo | Dónde está en la REC | Uso |
+| --- | --- | --- |
+| Expediente coactivo (con año) | Encabezado impreso | Clave de la fila: debe existir exactamente una coincidencia en la hoja. |
+| Nombre y apellidos del obligado | Encabezado impreso, «OBLIGADO (A)» | Se compara por palabras con el nombre de la fila; si no se parecen, alerta. |
+| Código de contribuyente | Encabezado impreso | Debe coincidir con la columna K (SIGETI); si no, bloquea. |
+| Fecha de emisión | Impresa, «Ayacucho, 02 de setiembre de 2026» | Debe coincidir con la columna E de la fila; si no, bloquea (la foto es de otro lote). |
+| **Fecha de notificación** | **Manuscrita**, recuadro del cargo | El dato que se escribe en F. Es el único manuscrito: tres lectores, tinta aislada, confianza y cotejo visual. |
+| Número de resolución | Impreso, «Resolución N° UNO» | Apoyo: si se lee otra distinta de UNO bloquea; si no se lee, el revisor lo confirma con una casilla. |
+
+El sondeo de formato (celda 3, `SONDEO_FORMATO`) recorre todas las fotos sin OCR y resume orientación, tamaño y carpeta; el sondeo de estructura (tras el piloto y tras el lote) indica cuántas fotos leídas son REC completas con los cinco campos y el recuadro de fecha localizado. La conciliación compara las filas con E = fecha del lote frente a las fotos, por expediente: filas con foto, sin foto, con varias fotos, fotos de expedientes fuera del lote y fotos sin expediente legible. Los tres informes se guardan como JSON en la carpeta de resultados.
+
 ## Cómo funciona
 
 | Etapa | Qué hace |
