@@ -392,16 +392,16 @@ class LocalizacionTests(unittest.TestCase):
         rows=[caja(100,1700,900,1730,'Siendo las 9:00 horas, del dia 11/09/2026 , quien suscribe'),
               caja(1000,1900,1500,1930,'FECHA DE NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
         self.assertEqual(c.fecha_acta_negativa(rows),['2026-09-11'])
-        head='EXPEDIENTE COACTIVO : 16-012-000008411-2026-SAT-H/DCC-IPA\nRESOLUCION DE EJECUCION COACTIVA'
-        self.assertEqual(c.clasificar_documento(head,rows,self.W,self.H,'16-012-000008411-2026'),'REC')
-        self.assertEqual(c.clasificar_documento(head,[],2480,1748,'16-012-000008411-2026'),'REC_SIN_CARGO')
+        head='EXPEDIENTE COACTIVO : 16-012-000000001-2026-SAT-H/DCC-IPA\nRESOLUCION DE EJECUCION COACTIVA'
+        self.assertEqual(c.clasificar_documento(head,rows,self.W,self.H,'16-012-000000001-2026'),'REC')
+        self.assertEqual(c.clasificar_documento(head,[],2480,1748,'16-012-000000001-2026'),'REC_SIN_CARGO')
         self.assertEqual(c.clasificar_documento('texto suelto',rows,self.W,self.H,None),'CARGO_SIN_ENCABEZADO')
         self.assertEqual(c.clasificar_documento('AVISO PREVIO DE NOTIFICACION',[],3307,2330,None),'ANEXO')
         self.assertEqual(c.clasificar_documento('CEDULON',[],3307,2330,None),'ANEXO')
         self.assertEqual(c.clasificar_documento('nada',[],self.W,self.H,None),'DESCONOCIDO')
     def test_parse_header_resolucion_tolerante(self):
-        exp,code,res=c.parse_header('EXPEDIENTE COACTIVO : 16-012-000008411-2026-SAT-H/DCC-IPA\nCODIGO CONTRIBUYENTE: 000000066789\nResoluci6n N° UNO')
-        self.assertEqual((exp,code,res),('16-012-000008411-2026-SAT-H/DCC-IPA','66789','UNO'))
+        exp,code,res=c.parse_header('EXPEDIENTE COACTIVO : 16-012-000000001-2026-SAT-H/DCC-IPA\nCODIGO CONTRIBUYENTE: 000000000123\nResoluci6n N° UNO')
+        self.assertEqual((exp,code,res),('16-012-000000001-2026-SAT-H/DCC-IPA','123','UNO'))
         self.assertEqual(c.parse_header('RESOLUCLON N UNO')[2],'UNO')
         self.assertIsNone(c.parse_header('texto sin resolucion')[2])
         d=dict(expediente='16-012-1-2026',codigo='123',resolucion=None,fecha_notificacion='15/09/2026')
