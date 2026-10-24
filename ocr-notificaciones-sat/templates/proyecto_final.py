@@ -8,15 +8,28 @@ EXCEL_SHA_ESPERADO = EXCEL_SHA_ESPERADO.strip().lower()
 entrada = Path(RUTA_RESULTADOS) / 'entrada'
 entrada.mkdir(exist_ok=True)
 EXCEL = entrada / 'original_expedientes.xlsx'
+EXCEL_DRIVE = None  # Excel de trabajo en Drive; la celda 6 puede escribir en él con respaldo.
+if RUTA_EXCEL_EN_DRIVE.strip():
+    EXCEL_DRIVE = Path(RUTA_EXCEL_EN_DRIVE.strip())
+    if not EXCEL_DRIVE.is_file() or EXCEL_DRIVE.suffix.lower() != '.xlsx':
+        raise FileNotFoundError('No se encontró el .xlsx indicado en RUTA_EXCEL_EN_DRIVE: ' + str(EXCEL_DRIVE))
+else:
+    candidatos = sorted(p for p in Path(RUTA_FOTOS).glob('*.xlsx') if p.name.lower() != 'inventario_fotos.xlsx' and '_respaldo_' not in p.name)
+    if len(candidatos) == 1:
+        EXCEL_DRIVE = candidatos[0]
+    elif len(candidatos) > 1:
+        raise ValueError('Hay varios .xlsx en la carpeta de fotos; indica cuál en RUTA_EXCEL_EN_DRIVE: ' + ', '.join(p.name for p in candidatos))
+if EXCEL_DRIVE is not None:
+    print('Excel de trabajo en Drive:', EXCEL_DRIVE)
+    if EXCEL.exists() and sha256(EXCEL) != sha256(EXCEL_DRIVE):
+        raise ValueError('El Excel de Drive no coincide con la copia de entrada guardada en la carpeta de resultados. '
+                         'Si cambiaste el Excel, usa otra carpeta de resultados; si lo actualizó la celda 6, la copia de entrada ya debería coincidir.')
 if not EXCEL.exists():
     temporal = entrada / 'original.tmp'
-    if RUTA_EXCEL_EN_DRIVE.strip():
-        origen = Path(RUTA_EXCEL_EN_DRIVE.strip())
-        if not origen.is_file() or origen.suffix.lower() != '.xlsx':
-            raise FileNotFoundError('No se encontró el .xlsx indicado en RUTA_EXCEL_EN_DRIVE: ' + str(origen))
-        shutil.copyfile(origen, temporal)
+    if EXCEL_DRIVE is not None:
+        shutil.copyfile(EXCEL_DRIVE, temporal)
     else:
-        print('Selecciona el Excel original de expedientes (.xlsx). Se guardará en Drive para reanudar sin volver a subirlo.')
+        print('No hay .xlsx en la carpeta de fotos. Selecciona el Excel de expedientes; se guardará en la carpeta de resultados.')
         subidos = files.upload()
         validos = [b for n, b in subidos.items() if n.lower().endswith('.xlsx')]
         if len(validos) != 1:

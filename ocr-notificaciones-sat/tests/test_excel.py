@@ -318,6 +318,39 @@ class ExportacionLegalTests(ProyectoBase):
             xlsx,_=p.exportar(doble_revision=False)
         self.assertIsNotNone(xlsx)
         self.assertEqual(load_workbook(xlsx)['2026']['F2'].value.date(),date(2026,9,16))
+    def test_actualizar_excel_en_drive_con_respaldo(self):
+        p=self.preparar(); rid=sorted(p.active)[0]
+        drive=Path(self.temp.name)/'PROYECTO REC 1'/'expedientes.xlsx'; drive.parent.mkdir()
+        drive.write_bytes(self.excel.read_bytes())
+        p.aprobar(rid,self.datos(),'Ana')
+        with contextlib.redirect_stdout(io.StringIO()):
+            copia,_=p.exportar()
+        huella_original=p.fingerprint
+        with contextlib.redirect_stdout(io.StringIO()):
+            destino,respaldo=p.actualizar_excel_en_drive(copia,drive)
+        self.assertEqual(destino,drive); self.assertTrue(respaldo.exists()); self.assertIn('_respaldo_',respaldo.name)
+        self.assertEqual(c.sha256(respaldo),huella_original)            # respaldo = original intacto
+        self.assertEqual(c.sha256(drive),c.sha256(copia))               # Drive = copia verificada
+        self.assertEqual(c.sha256(p.excel),c.sha256(drive))             # copia de entrada renovada
+        self.assertEqual(p.fingerprint,c.sha256(drive))
+        cfg=json.loads((self.salida/'proyecto.json').read_text())
+        self.assertEqual(cfg['excel_sha256'],p.fingerprint); self.assertEqual(cfg['excel_sha256_historial'][0]['anterior'],huella_original)
+        self.assertEqual(load_workbook(drive)['2026']['F2'].value.date(),date(2026,9,15))
+        # El índice ya ve F2 registrada: una nueva aprobación sobre esa celda se rechaza y una exportación no la reescribe.
+        with self.assertRaises(ValueError):
+            p.aprobar(rid,self.datos(),'Luis')
+        with contextlib.redirect_stdout(io.StringIO()):
+            xlsx,_=p.exportar()
+        self.assertIsNone(xlsx)
+        # Reabrir la carpeta de resultados con el Excel actualizado es válido; con el respaldo (huella anterior) no.
+        with contextlib.redirect_stdout(io.StringIO()):
+            c.Proyecto(self.fotos,drive,self.salida)
+        with self.assertRaises(ValueError):
+            c.Proyecto(self.fotos,respaldo,self.salida)
+        # Si el Excel de Drive cambió a mano, no se sobrescribe.
+        drive.write_bytes(drive.read_bytes()+b' ')
+        with self.assertRaises(ValueError):
+            p.actualizar_excel_en_drive(copia,drive)
     def test_resolucion_no_leida_exige_casilla(self):
         p=self.preparar(); rid=sorted(p.active)[0]
         sin=self.datos(); sin['resolucion']=None
@@ -523,6 +556,8 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('@param',''.join(cells[0]['source']))
         self.assertIn('def configurar(',''.join(cells[1]['source']))
         self.assertIn('DOBLE_REVISION',''.join(cells[5]['source']))
+        self.assertIn('ESCRIBIR_EN_EXCEL_DE_DRIVE',''.join(cells[5]['source']))
+        self.assertIn('EXCEL_DRIVE',''.join(cells[1]['source']))
         self.assertIn('LECTOR_VLM',''.join(cells[3]['source']))
         self.assertIn('langchain',''.join(cells[0]['source']))
         self.assertIn('medir_acierto',''.join(cells[2]['source']))

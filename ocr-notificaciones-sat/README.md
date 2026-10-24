@@ -30,7 +30,7 @@ El sondeo de formato (celda 3, `SONDEO_FORMATO`) recorre todas las fotos sin OCR
 | 3 · Prueba con muestra | Procesa ~20 fotos repartidas por carpetas y estima el tiempo total. |
 | 4 · Procesamiento | Tres lectores independientes (PaddleOCR PP-OCRv5, TrOCR manuscrito y Qwen2.5-VL) sobre el recuadro de fecha, con tinta azul aislada, nivel de confianza y alertas. |
 | 5 · Revisión | Muestra encabezado, cargo, recorte de la fecha y manuscrito aislado; el revisor corrige y confirma. Modo de segunda revisión. |
-| 6 · Exportación | Copia del XLSX con las fechas confirmadas, informe CSV y acta de exportación con huellas SHA-256. |
+| 6 · Exportación | Copia del XLSX con las fechas confirmadas, informe CSV y acta con huellas SHA-256. Opcionalmente lleva esas fechas al Excel de trabajo de Drive, con respaldo previo. |
 | 7 · Opcional | ZIP con casos pendientes para una segunda revisión externa. |
 
 Alcance por defecto: hoja `2026`, filas con columna E (emisión REC) = `02/09/2026` y columna F (notificación REC) vacía. Ambos valores se cambian en la celda 2 y quedan registrados en `proyecto.json` de la carpeta de resultados, de modo que una carpeta no se mezcla con otro Excel ni otro lote.
@@ -43,7 +43,9 @@ Alcance por defecto: hoja `2026`, filas con columna E (emisión REC) = `02/09/20
 4. Tras la celda 3, mira los segundos por foto y la estimación de horas. Si supera tu sesión de Colab, usa `LIMITE` en la celda 4 para avanzar por lotes o activa `MODO_RAPIDO`.
 5. Revisa en la celda 5 y exporta en la 6 tantas veces como necesites.
 
-El Excel de trabajo es el archivo guardado en Drive cuya huella SHA-256 está en `EXCEL_SHA_ESPERADO` (celda 2); la celda lo copia a `entrada/` y comprueba la huella. Si usas otro lote, cambia o vacía ese valor.
+El Excel de trabajo es el archivo `.xlsx` guardado en Drive dentro de la carpeta de fotos (`PROYECTO REC 1`), el mismo que se abre desde Drive. La celda 2 lo localiza sola si es el único `.xlsx` de esa carpeta (sin contar `inventario_fotos.xlsx` ni los respaldos), lo copia a `entrada/` y liga la carpeta de resultados a su huella SHA-256; `RUTA_EXCEL_EN_DRIVE` permite indicarlo a mano y `EXCEL_SHA_ESPERADO` exigir una huella concreta.
+
+Para que las fechas confirmadas queden en ese mismo Excel de Drive, activa `ESCRIBIR_EN_EXCEL_DE_DRIVE` en la celda 6: se genera primero la copia verificada en resultados, se guarda un respaldo `<nombre>_respaldo_<fecha>.xlsx` junto al Excel de trabajo, se comprueba que nadie lo cambió desde que se cargó y solo entonces se sustituye. El proyecto pasa a trabajar con la versión actualizada (nueva huella en `proyecto.json`, con historial), así que las exportaciones siguientes solo añaden fechas nuevas. Mientras Colab escribe, no edites ese Excel en Google Sheets.
 
 Rutas por defecto en Drive:
 

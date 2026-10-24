@@ -15,7 +15,7 @@ Supervisa `REC_2026_02_SEPTIEMBRE_Colab.ipynb`. El objetivo es leer las 3.996 fo
 - Actas: `acta_exportacion_*.json` con huellas del original y de cada copia generada.
 - Exportaciones: `expedientes_actualizados_*.xlsx` y `revision_*.csv`.
 
-El Excel de trabajo es el archivo guardado en Drive cuya huella SHA-256 figura en `EXCEL_SHA_ESPERADO` (celda 2). La celda 2 lo copia a `entrada/original_expedientes.xlsx` y comprueba esa huella; abrirlo y volver a guardarlo en Excel la cambia aunque los valores parezcan iguales. No se usa ninguna otra copia del Excel. No guardes identificadores de Drive ni datos de contribuyentes en el repositorio.
+El Excel de trabajo es el `.xlsx` guardado en Drive dentro de `PROYECTO REC 1` (el que el usuario abre desde Drive). La celda 2 lo localiza, lo copia a `entrada/original_expedientes.xlsx` y liga la carpeta de resultados a su huella SHA-256 (`proyecto.json`); abrirlo y volver a guardarlo cambia la huella. Con `ESCRIBIR_EN_EXCEL_DE_DRIVE` (celda 6) las fechas confirmadas se escriben en ese mismo Excel tras guardar un respaldo `_respaldo_<fecha>.xlsx` junto a él; `proyecto.json` conserva el historial de huellas. No se usa ninguna otra copia del Excel. No guardes identificadores de Drive ni datos de contribuyentes en el repositorio.
 
 ## Funcionamiento
 
@@ -24,7 +24,7 @@ El Excel de trabajo es el archivo guardado en Drive cuya huella SHA-256 figura e
 3. Sondeo y piloto: `sondeo_formato()` sobre todas las fotos sin OCR; muestra de `MUESTRA` fotos con acierto contra F registrada, `sondeo_estructura()` (campos clave: expediente, nombre, código, emisión impresa, fecha manuscrita) y `conciliar()` (filas con E = lote frente a fotos por expediente). Informes en JSON en la carpeta de resultados.
 4. Procesamiento: PaddleOCR + TrOCR + Qwen2.5-VL (`LECTOR_VLM`) sobre el recuadro de fecha con tinta azul aislada; confianza ALTA/MEDIA/CONTRADICTORIA/SIN_FECHA y alertas. Todos los registros NUEVOS (o hasta `LIMITE`). `REINTENTAR_ERRORES` controla los errores anteriores. Guarda cada lectura y llama al exportador; si ya había aprobaciones recuperadas, puede producir una copia actualizada.
 5. Revisión: muestra imagen, recortes, lecturas y campos; requiere nombre del revisor, cotejo y confirmación. `MODO = segunda` para el segundo revisor; la misma persona no puede firmar dos veces los mismos datos.
-6. Exportación: revalida todas las aprobaciones, aplica `DOBLE_REVISION` (ninguna, no_alta, todas) y genera copia, CSV y acta JSON.
+6. Exportación: revalida todas las aprobaciones, aplica `DOBLE_REVISION` (ninguna, no_alta, todas) y genera copia, CSV y acta JSON; con `ESCRIBIR_EN_EXCEL_DE_DRIVE` sustituye el Excel de trabajo de Drive con respaldo previo y rota la huella del proyecto.
 7. Paquete opcional: hasta `CASOS` pendientes para revisión externa; no los envía automáticamente.
 
 Estados: NUEVO, POR_REVISAR, PENDIENTE, APROBADO, ERROR. POR_REVISAR no es un fallo ni una aprobación. Menos imágenes únicas que archivos es normal si hay duplicados. Ninguna aprobación implica que todavía no hay copia actualizada; sí puede haber informe CSV.

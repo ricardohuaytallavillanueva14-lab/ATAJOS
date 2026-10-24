@@ -1524,6 +1524,48 @@ class Proyecto:
         display(W.VBox([choice,full,rotate,output,exp,nom,code,res,dt,em,who,check,rec_uno,W.HBox([approve,skip,next_btn]),msg]))
         load()
 
+    def actualizar_excel_en_drive(self, actualizado, destino):
+        """Lleva la copia verificada al Excel de trabajo de Drive, con respaldo del anterior.
+
+        actualizado: copia generada por exportar() (solo cambian las celdas F aprobadas).
+        destino: ruta del Excel de trabajo en Drive. Antes de sustituirlo se guarda
+        <nombre>_respaldo_<marca>.xlsx en la misma carpeta y se comprueba la huella del
+        destino contra la del proyecto (si cambió a mano, se detiene). Después, el proyecto
+        pasa a trabajar con el Excel actualizado: nueva huella, índice reconstruido (las
+        celdas recién escritas quedan como ya registradas) y copia de entrada renovada.
+        """
+        actualizado, destino = Path(actualizado), Path(destino)
+        if not actualizado.is_file() or actualizado.suffix.lower() != '.xlsx':
+            raise ValueError('No existe la copia actualizada: ' + str(actualizado))
+        if not destino.is_file():
+            raise ValueError('No existe el Excel de trabajo en Drive: ' + str(destino))
+        if sha256(destino) != self.fingerprint:
+            raise ValueError('El Excel de Drive cambió desde que se cargó (otra huella). No se sobrescribe; vuelve a ejecutar la celda 2 con una carpeta de resultados nueva.')
+        nueva = sha256(actualizado)
+        marca = datetime.now().strftime('%Y%m%d_%H%M%S')
+        respaldo = destino.with_name(f'{destino.stem}_respaldo_{marca}.xlsx')
+        import shutil
+        shutil.copyfile(destino, respaldo)
+        if sha256(respaldo) != self.fingerprint:
+            raise ValueError('El respaldo no coincide con el original; no se sobrescribe.')
+        tmp = destino.with_name(destino.name + '.tmp')
+        shutil.copyfile(actualizado, tmp)
+        if sha256(tmp) != nueva:
+            tmp.unlink(missing_ok=True); raise ValueError('La copia al destino no se verificó; no se sobrescribe.')
+        os.replace(tmp, destino)
+        if self.excel != destino:
+            shutil.copyfile(destino, self.excel)
+        cfg_path = self.salida/'proyecto.json'
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        cfg.setdefault('excel_sha256_historial', []).append({'anterior': self.fingerprint, 'nuevo': nueva, 'fecha': ahora(),
+                                                             'respaldo': respaldo.name, 'copia': actualizado.name})
+        cfg['excel_sha256'] = nueva
+        atomic_json(cfg_path, cfg)
+        self.fingerprint = nueva
+        self.index, self.resumen_hojas, self.epoch = build_index(self.excel, tuple(cfg['hojas']))
+        print(f'Excel de Drive actualizado: {destino.name}. Respaldo: {respaldo.name}. Nueva huella: {nueva[:16]}…')
+        return destino, respaldo
+
     def exportar(self, doble_revision=False):
         """Escribe las fechas aprobadas en una copia del Excel y deja constancia.
 
