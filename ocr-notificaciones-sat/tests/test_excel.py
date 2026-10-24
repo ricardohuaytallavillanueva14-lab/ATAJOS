@@ -441,9 +441,17 @@ class EmparejamientoTests(ProyectoBase):
         # Medición contra F ya registrada: la fila 3 (16-012-3) tiene 10/09/2026.
         p.records[f2]['lectura'].update(expediente='16-012-3-2026',fecha_notificacion='10/09/2026')
         p.records[f1]['lectura'].update(fecha_notificacion='11/09/2026',expediente='16-012-3-2026')
-        with contextlib.redirect_stdout(io.StringIO()):
+        p.records[f2]['confianza']='ALTA'; p.records[f1]['confianza']='MEDIA'
+        with contextlib.redirect_stdout(io.StringIO()) as out:
             res=p.medir_acierto()
         self.assertEqual((res['con_referencia'],res['aciertos'],res['errores']),(2,1,1))
+        self.assertEqual(res['tabla']['ALTA'],{'total':1,'ACIERTO':{'n':1,'pct':100.0},'ERROR':{'n':0,'pct':0.0},'SIN_FECHA':{'n':0,'pct':0.0}})
+        self.assertEqual(res['tabla']['MEDIA']['ERROR'],{'n':1,'pct':100.0}); self.assertEqual(res['tabla']['TOTAL']['total'],2)
+        self.assertFalse(res['concluyente']); self.assertIn('no es concluyente',out.getvalue())
+        self.assertIn('confianza',out.getvalue()); self.assertIn('ACIERTO',out.getvalue())
+        guardado=json.loads(Path(res['archivo']).read_text(encoding='utf-8'))
+        self.assertEqual(guardado['tabla']['TOTAL']['total'],2); self.assertTrue(Path(res['archivo']).name.startswith('piloto_'))
+        self.assertIn('tipos',guardado); self.assertIn('confianza_muestra',guardado)
 
 class NotebookTests(unittest.TestCase):
     def setUp(self):
@@ -469,6 +477,7 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('LECTOR_VLM',''.join(cells[3]['source']))
         self.assertIn('langchain',''.join(cells[0]['source']))
         self.assertIn('medir_acierto',''.join(cells[2]['source']))
+        self.assertIn('MUESTRA = 200',''.join(cells[2]['source']))
     def test_notebook_matches_templates(self):
         nb=json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(nb,self.builder.render(),'Ejecuta python scripts/build_notebook.py y confirma el cuaderno.')

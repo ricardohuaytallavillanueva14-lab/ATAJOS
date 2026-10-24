@@ -1070,14 +1070,17 @@ class Proyecto:
         print(f'Hoja {HOJA}, E = {FECHA_EMISION:%d/%m/%Y}: {vacias+llenas} filas; F vacía: {vacias}; F ya registrada: {llenas}.')
         return {'filas':vacias+llenas,'f_vacia':vacias,'f_registrada':llenas}
 
-    def medir_acierto(self, ids=None):
+    def medir_acierto(self, ids=None, guardar=True, minimo_alta=30):
         """Compara la fecha propuesta por el OCR con la columna F ya registrada en el Excel.
 
         Solo usa fotos cuyo expediente coincide con una fila que ya tiene F: son el patrón
-        de referencia para estimar el acierto real antes del lote completo.
+        de referencia para estimar el acierto real antes del lote completo. Imprime la tabla
+        confianza x resultado y guarda piloto_<marca>.json en la carpeta de resultados.
+        Con menos de minimo_alta casos ALTA con referencia, el acierto de ALTA no es concluyente.
         """
         ids=list(ids) if ids is not None else sorted(getattr(self,'active',self.records))
-        res={'con_referencia':0,'aciertos':0,'errores':0,'sin_fecha_ocr':0,'detalle':[]}
+        res={'generado_en':ahora(),'version':VERSION,'fotos_evaluadas':len(ids),'con_referencia':0,'aciertos':0,
+             'errores':0,'sin_fecha_ocr':0,'detalle':[]}
         for k in ids:
             r=self.records[k]; d=r.get('lectura') or {}
             parsed=expediente(d.get('expediente'))
@@ -1092,15 +1095,36 @@ class Proyecto:
             res['detalle'].append({'archivo':r['archivos'][0],'excel':ref.isoformat() if ref else None,
                                    'ocr':ocr.isoformat() if ocr else None,'confianza':r.get('confianza'),'resultado':estado})
         n=res['con_referencia']
+        niveles=['ALTA','MEDIA','CONTRADICTORIA','SIN_FECHA']; resultados=['ACIERTO','ERROR','SIN_FECHA']
+        tabla={}
+        for nivel in niveles+['TOTAL']:
+            filas=[x for x in res['detalle'] if nivel=='TOTAL' or (x['confianza'] or 'SIN_FECHA')==nivel]
+            total=len(filas)
+            tabla[nivel]={'total':total}
+            for est in resultados:
+                k=sum(1 for x in filas if x['resultado']==est)
+                tabla[nivel][est]={'n':k,'pct':round(100*k/total,1) if total else None}
+        res['tabla']=tabla
+        res['alta_con_referencia']=tabla['ALTA']['total']
+        res['concluyente']=tabla['ALTA']['total']>=minimo_alta
+        res['tipos']=dict(Counter(self.records[k].get('tipo') or '-' for k in ids))
+        res['confianza_muestra']=dict(Counter(self.records[k].get('confianza') or (self.records[k]['estado'] if self.records[k]['estado'] in ('ERROR','ANEXO') else 'SIN_LECTURA') for k in ids))
         if n:
-            print(f"Fotos con fecha de referencia en el Excel: {n}. Aciertos: {res['aciertos']} ({100*res['aciertos']/n:.0f}%). "
-                  f"Errores: {res['errores']}. Sin fecha OCR: {res['sin_fecha_ocr']}.")
-            por_conf=Counter((x['confianza'],x['resultado']) for x in res['detalle'])
-            for (conf,est),c in sorted(por_conf.items()): print(f'  {conf or "-"}: {est} = {c}')
+            print(f"Fotos con fecha de referencia en el Excel: {n} de {len(ids)}.")
+            print(f"{'confianza':<15}{'total':>6}  "+'  '.join(f'{e:>16}' for e in resultados))
+            for nivel in niveles+['TOTAL']:
+                fila=tabla[nivel]
+                celdas='  '.join(f"{fila[e]['n']:>5} ({fila[e]['pct'] if fila[e]['pct'] is not None else 0:>5.1f}%)" for e in resultados)
+                print(f"{nivel:<15}{fila['total']:>6}  {celdas}")
             for x in res['detalle']:
-                if x['resultado']=='ERROR': print('  ERROR', x['archivo'], 'Excel', x['excel'], 'OCR', x['ocr'])
+                if x['resultado']=='ERROR': print('  ERROR', x['archivo'], 'Excel', x['excel'], 'OCR', x['ocr'], 'confianza', x['confianza'])
+            if not res['concluyente']:
+                print(f"AVISO: solo {tabla['ALTA']['total']} casos ALTA con referencia (mínimo {minimo_alta}); el acierto de ALTA no es concluyente. Amplía la muestra.")
         else:
             print('Ninguna foto de la muestra corresponde a una fila con F ya registrada; amplía la muestra.')
+        if guardar:
+            ruta=self.salida/f"piloto_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            atomic_json(ruta,res); res['archivo']=str(ruta); print('Piloto guardado en',ruta)
         return res
 
     def aprobar(self,rid,data,revisor,verifico_rec_uno=False):
