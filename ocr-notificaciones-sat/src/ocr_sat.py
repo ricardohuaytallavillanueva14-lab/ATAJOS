@@ -125,12 +125,22 @@ def aviso_lectores(motor):
     return 'Lectores manuscritos activos: ' + ', '.join(manuscritos) + '. ALTA exige que ambos coincidan.'
 
 
-def alertas(data, target=None):
-    """Avisos de plausibilidad que no bloquean la aprobación pero exigen atención."""
+def alertas(data, target=None, evidencia=None):
+    """Avisos de plausibilidad que no bloquean la aprobación pero exigen atención.
+
+    evidencia: evidencia_ocr del registro; si trae 'fecha_acta' (la fecha escrita en
+    'del día __/__/__' del acta) distinta de la propuesta, se añade una alerta. El cruce
+    no cambia la confianza: en DOMICILIO CERRADO el acta lleva la fecha del aviso previo
+    (día anterior), así que una diferencia puede ser legítima; en NEGATIVA debería coincidir.
+    """
     avisos = []
     d = fecha((data or {}).get('fecha_notificacion'))
     if d is None:
         return avisos
+    acta = [a for a in ((evidencia or {}).get('fecha_acta') or []) if fecha(a)]
+    if acta and d.isoformat() not in acta:
+        avisos.append('La fecha escrita en el acta («del día …») es ' + ', '.join(f'{fecha(a):%d/%m/%Y}' for a in acta)
+                      + f' y difiere de la del recuadro ({d:%d/%m/%Y}). En DOMICILIO CERRADO suele ser el aviso previo del día anterior; en NEGATIVA debe coincidir. Verifica en la foto.')
     em = fecha(target['emision']) if target else fecha((data or {}).get('fecha_emision'))
     if em and (d - em).days > VENTANA_DIAS:
         avisos.append(f'La notificación es {(d - em).days} días posterior a la emisión (ventana habitual: {VENTANA_DIAS}). Verifica mes y año en la foto.')
@@ -773,11 +783,12 @@ class MotorOCR:
                 registrar(label, '' if 'ILEGIBLE' in respuesta.upper() else respuesta)
                 if 'ILEGIBLE' in respuesta.upper():
                     evidence['variantes_fecha'][-1]['texto'] = respuesta
-        # Control cruzado: en NEGATIVA la misma fecha se escribe también en el acta ('del día __/__/__').
+        # Fecha del acta ('Siendo las __ horas, del día __/__/__'). Solo informa y genera alerta si
+        # difiere de la propuesta: no entra en las candidatas ni en la confianza (ver alertas()).
         acta = fecha_acta_negativa(foot_abs)
+        evidence['fecha_acta'] = acta
         if acta:
-            evidence['variantes_fecha'].append({'vista': 'acta_negativa', 'texto': 'fecha del acta de negativa', 'fechas': acta})
-            candidates.append(acta)
+            evidence['variantes_fecha'].append({'vista': 'acta_negativa', 'texto': 'fecha del acta (no cuenta para la confianza)', 'fechas': acta})
         nonempty = {x for seq in candidates for x in seq}
         evidence['candidatas_corregidas'] = [corregidas[k] for k in sorted(corregidas)]
         evidence['propuesta_corregida'] = False
@@ -961,7 +972,7 @@ class Proyecto:
                 tipo=evidence.get('tipo','REC')
                 r.update(lectura=d,estado='ANEXO' if tipo=='ANEXO' else 'POR_REVISAR',destino=target,problemas=issues,
                          evidencia_ocr=evidence,motor=motor.nombre,leido_en=ahora(),error=None,tipo=tipo,
-                         confianza=evidence.get('confianza','SIN_FECHA'),alertas=alertas(d,target),pareja=None)
+                         confianza=evidence.get('confianza','SIN_FECHA'),alertas=alertas(d,target,evidence),pareja=None)
                 self.save(r)
                 resumen['discrepancias' if issues else 'confirmar']+=1
             except KeyboardInterrupt:
@@ -1022,7 +1033,7 @@ class Proyecto:
                         d['observaciones']=(f'Expediente y código tomados de la media página {nombre_prev}. '
                                             'Confirma que ambas fotos son el mismo documento. '+(d.get('observaciones') or ''))
                         target,issues=evaluar(d,self.index)
-                        r.update(lectura=d,destino=target,problemas=issues,pareja=kp,alertas=alertas(d,target))
+                        r.update(lectura=d,destino=target,problemas=issues,pareja=kp,alertas=alertas(d,target,r.get('evidencia_ocr')))
                         rp.update(pareja=k,problemas=[f'Media página sin cargo; su fecha se toma de {nombre}.'])
                         self.save(r); self.save(rp); nuevas+=1
                         break
@@ -1101,7 +1112,7 @@ class Proyecto:
                 raise ValueError('Este revisor ya confirmó estos mismos datos. La segunda revisión debe hacerla otra persona.')
             r.setdefault('historial_aprobaciones',[]).append(previous)
         entrada = {'datos':data,'destino':target,'revisor':revisor.strip(),'fecha':ahora(),
-                   'confianza_ocr':r.get('confianza'),'alertas':alertas(data,target),
+                   'confianza_ocr':r.get('confianza'),'alertas':alertas(data,target,r.get('evidencia_ocr')),
                    'verifico_rec_uno':bool(verifico_rec_uno),
                    'lectura_ocr':(r.get('lectura') or {}).get('fecha_notificacion'),
                    'evidencia':self.guardar_evidencia(r)}
@@ -1227,7 +1238,7 @@ class Proyecto:
                         print(f"  candidata corregida ({cnd['regla']}, {cnd.get('vista')}): {cnd['fecha']} desde '{cnd['texto']}'. No cuenta para la confianza.")
                     print('Observaciones de lectura:',data.get('observaciones') or 'Ninguna')
                     print('Comprobaciones:',issues or 'Coinciden; falta tu comprobación visual.')
-                    for aviso in alertas(data,target): print('ALERTA:',aviso)
+                    for aviso in alertas(data,target,r.get('evidencia_ocr')): print('ALERTA:',aviso)
                     vigentes=self.aprobaciones_vigentes(r)
                     if vigentes:
                         print('Aprobaciones vigentes:',', '.join(f"{a['revisor']} ({a['fecha']})" for a in vigentes))
@@ -1301,7 +1312,7 @@ class Proyecto:
                      'aprobado_en':a['fecha'] if a else '', 'confianza_ocr':r.get('confianza') or '','tipo':r.get('tipo') or '',
                      'verifico_rec_uno':('si' if a.get('verifico_rec_uno') else 'no') if a else '',
                      'lectura_ocr':(r.get('lectura') or {}).get('fecha_notificacion') or '',
-                     'alertas':' | '.join(alertas(d,target)),
+                     'alertas':' | '.join(alertas(d,target,r.get('evidencia_ocr'))),
                      'evidencia':' | '.join(sorted((a.get('evidencia') or {}).values())) if a else '',
                      'resultado':'NO EXPORTADO',
                      'detalle':'; '.join(issues) or r.get('error') or ''}

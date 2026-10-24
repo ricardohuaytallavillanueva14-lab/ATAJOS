@@ -249,6 +249,12 @@ class FiabilidadTests(unittest.TestCase):
             avisos=c.alertas({'fecha_notificacion':'15/12/2026','resolucion':'UNO'},t)
             self.assertEqual(len(avisos),1); self.assertIn('104 días',avisos[0])
             self.assertTrue(any('domingo' in a for a in c.alertas({'fecha_notificacion':'06/09/2026','resolucion':'UNO'},t)))
+            # Cruce con la fecha del acta: solo alerta, nunca cambia la confianza.
+            d={'fecha_notificacion':'22/09/2026','resolucion':'UNO'}
+            self.assertEqual(c.alertas(d,t,{'fecha_acta':['2026-09-22']}),[])
+            av=c.alertas(d,t,{'fecha_acta':['2026-09-21']})
+            self.assertEqual(len(av),1); self.assertIn('21/09/2026',av[0]); self.assertIn('DOMICILIO CERRADO',av[0])
+            self.assertEqual(c.alertas(d,t,{'fecha_acta':[]}),[]); self.assertEqual(c.alertas(d,t,None),[])
             with self.assertRaises(ValueError): c.configurar(ventana_dias=0)
         finally:
             c.VENTANA_DIAS=original
