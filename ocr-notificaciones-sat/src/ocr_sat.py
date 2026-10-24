@@ -74,32 +74,55 @@ def vista_tinta(im, min_fraccion=0.002):
     return Image.fromarray(salida, 'RGB'), fraccion
 
 
+# Lectores entrenados en escritura manual. El detector impreso (PaddleOCR/EasyOCR) lee mal
+# los manuscritos, así que su coincidencia no basta para la confianza ALTA.
+LECTORES_MANUSCRITOS = ('trocr', 'vlm', 'deepseek')
+
+
 def familia_lector(vista):
-    """Agrupa las vistas por lector independiente: paddle, trocr, vlm, deepseek."""
-    for prefijo in ('trocr', 'vlm', 'deepseek', 'acta'):
+    """Agrupa las vistas por lector independiente: detector (impreso), trocr, vlm, deepseek, acta."""
+    for prefijo in LECTORES_MANUSCRITOS + ('acta',):
         if str(vista).startswith(prefijo):
             return prefijo
-    return 'paddle'
+    return 'detector'
 
 
 def nivel_confianza(variantes, propuesta):
-    """Clasifica la propuesta de fecha según cuántos lectores independientes coinciden.
+    """Clasifica la propuesta de fecha según qué lectores independientes coinciden.
 
-    ALTA: dos o más lectores distintos leyeron exactamente la misma fecha y ninguno otra.
-    MEDIA: un solo lector obtuvo la fecha y ninguno la contradice.
+    ALTA: al menos dos lectores manuscritos distintos (TrOCR, VLM) leyeron exactamente la
+        misma fecha y ningún lector leyó otra. El detector impreso no cuenta para ALTA:
+        detector + un manuscrito = MEDIA. Sin el lector VLM, ALTA no es alcanzable.
+    MEDIA: hay propuesta, nadie la contradice, pero no llegan a dos lectores manuscritos.
     CONTRADICTORIA: hay lecturas de fechas distintas. SIN_FECHA: nadie leyó una fecha.
+    Las lecturas marcadas como corregidas no cuentan para ningún nivel.
+    La fecha del acta ('acta') no interviene: solo genera alerta (ver alertas_cruce).
     Ningún nivel sustituye el cotejo visual: solo ordena y documenta la revisión.
     """
     por_familia = defaultdict(set)
     for v in variantes:
-        por_familia[familia_lector(v.get('vista'))].update(v.get('fechas') or [])
+        familia = familia_lector(v.get('vista'))
+        if familia == 'acta':
+            continue
+        por_familia[familia].update(v.get('fechas') or [])
     distintas = {d for ds in por_familia.values() for d in ds}
-    if propuesta is None or not distintas:
-        return 'CONTRADICTORIA' if len(distintas) > 1 else 'SIN_FECHA', []
-    coinciden = sorted(f for f, ds in por_familia.items() if ds == {propuesta})
     if len(distintas) > 1:
-        return 'CONTRADICTORIA', coinciden
-    return ('ALTA' if len(coinciden) >= 2 else 'MEDIA'), coinciden
+        return 'CONTRADICTORIA', sorted(f for f, ds in por_familia.items() if ds == {propuesta})
+    if propuesta is None:
+        return 'SIN_FECHA', []
+    coinciden = sorted(f for f, ds in por_familia.items() if ds == {propuesta})
+    manuscritos = [f for f in coinciden if f in LECTORES_MANUSCRITOS]
+    return ('ALTA' if len(manuscritos) >= 2 else 'MEDIA'), coinciden
+
+
+def aviso_lectores(motor):
+    """Texto para pantalla sobre qué lectores manuscritos hay y si ALTA es alcanzable."""
+    manuscritos = ['TrOCR'] + (['Qwen2.5-VL'] if getattr(motor, 'vlm', None) is not None else [])
+    if len(manuscritos) < 2:
+        return ('Lectores manuscritos activos: ' + ', '.join(manuscritos) + '. Con un solo lector manuscrito la '
+                'confianza ALTA no es alcanzable (es intencional): todas las fechas quedarán como máximo en MEDIA '
+                'y requieren el mismo cotejo visual. Activa LECTOR_VLM para poder alcanzar ALTA.')
+    return 'Lectores manuscritos activos: ' + ', '.join(manuscritos) + '. ALTA exige que ambos coincidan.'
 
 
 def alertas(data, target=None):
@@ -815,6 +838,8 @@ class Proyecto:
                  (reprocesar_pendientes and self.records[k]['estado'] in {'POR_REVISAR','PENDIENTE'}
                   and self.records[k].get('motor')!=motor.nombre)][:limite]
         resumen={'procesadas':0,'confirmar':0,'discrepancias':0,'errores':0,'segundos':0.0,'detenido':False}
+        if pending:
+            print(aviso_lectores(motor))
         inicio=time.monotonic()
         barra=_progreso(pending,len(pending),'OCR')
         for r in barra:

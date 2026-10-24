@@ -191,10 +191,28 @@ class FiabilidadTests(unittest.TestCase):
         self.assertEqual(c.dates_in_text('N 15 021 000021666'),[])
     def test_nivel_confianza(self):
         v=lambda vista,fechas:{'vista':vista,'fechas':fechas,'texto':''}
-        self.assertEqual(c.nivel_confianza([v('color',['2026-09-15']),v('trocr_color',['2026-09-15'])],'2026-09-15'),('ALTA',['paddle','trocr']))
-        self.assertEqual(c.nivel_confianza([v('color',['2026-09-15']),v('tinta',['2026-09-15']),v('trocr_color',[])],'2026-09-15')[0],'MEDIA')
-        self.assertEqual(c.nivel_confianza([v('color',['2026-09-15']),v('vlm_color',['2026-09-16'])],None)[0],'CONTRADICTORIA')
-        self.assertEqual(c.nivel_confianza([v('color',[]),v('trocr_color',[])],None)[0],'SIN_FECHA')
+        F='2026-09-15'; G='2026-09-16'
+        casos=[
+            # (variantes, propuesta, nivel esperado, lectores que coinciden)
+            ([v('trocr_color',[F]),v('vlm_color',[F])],F,'ALTA',['trocr','vlm']),
+            ([v('color',[F]),v('trocr_color',[F]),v('vlm_color',[F])],F,'ALTA',['detector','trocr','vlm']),
+            ([v('color',[F]),v('trocr_color',[F])],F,'MEDIA',['detector','trocr']),       # impreso + un manuscrito
+            ([v('color',[F]),v('tinta',[F]),v('contraste',[F])],F,'MEDIA',['detector']),   # solo el detector impreso
+            ([v('trocr_color',[F]),v('trocr_tinta',[F])],F,'MEDIA',['trocr']),             # un solo manuscrito, dos vistas
+            ([v('vlm_color',[F])],F,'MEDIA',['vlm']),
+            ([v('color',[F]),v('trocr_color',[F]),v('vlm_color',[])],F,'MEDIA',['detector','trocr']),
+            ([v('trocr_color',[F]),v('vlm_color',[G])],None,'CONTRADICTORIA',[]),
+            ([v('color',[G]),v('trocr_color',[F]),v('vlm_color',[F])],None,'CONTRADICTORIA',[]),  # el detector contradice
+            ([v('trocr_color',[F]),v('vlm_color',[F]),v('acta_negativa',[G])],F,'ALTA',['trocr','vlm']),  # el acta no interviene
+            ([v('color',[]),v('trocr_color',[])],None,'SIN_FECHA',[]),
+            ([],None,'SIN_FECHA',[]),
+        ]
+        for variantes,prop,nivel,lectores in casos:
+            with self.subTest(nivel=nivel,variantes=[x['vista'] for x in variantes]):
+                self.assertEqual(c.nivel_confianza(variantes,prop),(nivel,lectores))
+        class M: vlm=None
+        self.assertIn('no es alcanzable',c.aviso_lectores(M()))
+        M.vlm=object(); self.assertIn('Qwen2.5-VL',c.aviso_lectores(M()))
     def test_alertas_plausibilidad(self):
         original=c.VENTANA_DIAS
         try:
