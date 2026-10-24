@@ -628,35 +628,196 @@ def clasificar_documento(head_text, foot_rows, ancho, alto, exp):
     return 'DESCONOCIDO'
 
 
-def probar_paddle(timeout=600):
-    """Comprueba en un subproceso que PaddleOCR puede inferir; una caída (segfault) no mata el cuaderno."""
+def kwargs_paddle(modo_rapido=False, cpu_threads=None, orientacion_auto=False):
+    """Argumentos de PaddleOCR comunes al modo en proceso y al trabajador aislado."""
+    kw = dict(use_doc_orientation_classify=bool(orientacion_auto), use_doc_unwarping=False,
+              use_textline_orientation=False, enable_mkldnn=False,
+              cpu_threads=int(cpu_threads or os.cpu_count() or 2))
+    if modo_rapido:
+        # Al nombrar modelos, PaddleOCR ignora lang/ocr_version: se fijan los dos.
+        # lang='es' equivale a PP-OCRv5_server_det + latin_PP-OCRv5_mobile_rec.
+        kw.update(text_detection_model_name='PP-OCRv5_mobile_det', text_recognition_model_name='latin_PP-OCRv5_mobile_rec')
+    else:
+        kw.update(lang='es', ocr_version='PP-OCRv5')
+    return kw
+
+
+def probar_paddle(timeout=900, python=None, kwargs=None):
+    """Comprueba en un subproceso que PaddleOCR puede inferir; una caída (segfault) no mata el cuaderno.
+
+    python: intérprete a probar (por defecto el actual; en Colab, el del entorno aislado).
+    """
     import subprocess, sys
+    kw = dict(kwargs or kwargs_paddle()); kw.setdefault('device', 'cpu')
     codigo_prueba = (
-        "import numpy as np\n"
+        "import json, numpy as np\n"
         "from paddleocr import PaddleOCR\n"
-        "o=PaddleOCR(lang='es',ocr_version='PP-OCRv5',device='cpu',use_doc_orientation_classify=False,"
-        "use_doc_unwarping=False,use_textline_orientation=False,enable_mkldnn=False)\n"
+        f"o=PaddleOCR(**json.loads({json.dumps(json.dumps(kw))}))\n"
         "im=np.full((96,320,3),255,np.uint8); im[30:60,20:300]=0\n"
         "list(o.predict(im)); print('PADDLE_OK')\n")
     try:
-        r = subprocess.run([sys.executable, '-c', codigo_prueba], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([python or sys.executable, '-c', codigo_prueba], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, 'tiempo agotado'
+    except OSError as e:
+        return False, f'no se pudo ejecutar {python or sys.executable}: {e}'
     if r.returncode == 0 and 'PADDLE_OK' in r.stdout:
         return True, 'ok'
     motivo = (r.stderr or r.stdout).strip().splitlines()[-1:] or [f'código de salida {r.returncode}']
     return False, f'código {r.returncode}: {motivo[0][:200]}'
 
 
+# Trabajador de PaddleOCR en un proceso aparte (puede ser otro intérprete, p. ej. Python 3.11 cuando
+# el del cuaderno es 3.13). Protocolo: una línea JSON de configuración, respuesta {'ready': ...},
+# luego una línea JSON por imagen ({'path': ...}) y una línea JSON de respuesta ({'rows': [...]}).
+# Todo lo que PaddleOCR imprima va a stderr; el protocolo usa un descriptor propio.
+PADDLE_WORKER_SRC = r'''
+import json, os, sys, traceback
+proto = os.fdopen(os.dup(1), 'w', buffering=1)
+os.dup2(2, 1); sys.stdout = sys.stderr
+def responder(obj):
+    proto.write(json.dumps(obj) + '\n'); proto.flush()
+def main():
+    cfg = json.loads(sys.stdin.readline() or '{}')
+    fake = bool(os.environ.get('PADDLE_WORKER_FAKE'))
+    ocr = None
+    if not fake:
+        try:
+            from paddleocr import PaddleOCR
+            ocr = PaddleOCR(**cfg.get('kwargs', {}))
+        except Exception as e:
+            responder({'error': type(e).__name__ + ': ' + str(e)[:400], 'traza': traceback.format_exc()[-800:]}); return 2
+    responder({'ready': True, 'python': sys.version.split()[0], 'fake': fake, 'pid': os.getpid()})
+    import numpy as np
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        req = json.loads(line)
+        if req.get('cmd') == 'exit':
+            break
+        if req.get('cmd') == 'crash':   # solo para pruebas
+            os._exit(139)
+        try:
+            if fake:
+                rows = [{'box': [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]], 'text': 'FAKE ' + os.path.basename(req['path']), 'score': 0.5}]
+            else:
+                from PIL import Image
+                with Image.open(req['path']) as im:
+                    arr = np.asarray(im.convert('RGB'))[:, :, ::-1].copy()
+                rows = []
+                for result in ocr.predict(arr):
+                    for box, text, score in zip(result['rec_polys'], result['rec_texts'], result['rec_scores']):
+                        rows.append({'box': [[float(x), float(y)] for x, y in box], 'text': str(text), 'score': float(score)})
+            responder({'rows': rows})
+        except Exception as e:
+            responder({'error': type(e).__name__ + ': ' + str(e)[:400]})
+    return 0
+if __name__ == '__main__':
+    sys.exit(main())
+'''
+
+
+class PaddleWorkerError(RuntimeError):
+    pass
+
+
+class PaddleWorker:
+    """PaddleOCR en un proceso aparte. Una caída del proceso se convierte en PaddleWorkerError."""
+    def __init__(self, python, kwargs, env=None, timeout_lectura=600, timeout_inicio=1800, log=None):
+        import tempfile
+        self.python = python or sys.executable
+        self.kwargs = dict(kwargs); self.env = dict(env or {})
+        self.timeout_lectura = timeout_lectura; self.timeout_inicio = timeout_inicio
+        self.dir = Path(tempfile.mkdtemp(prefix='paddle_worker_'))
+        self.script = self.dir / 'paddle_worker.py'; self.script.write_text(PADDLE_WORKER_SRC, encoding='utf-8')
+        self.log = Path(log) if log else self.dir / 'paddle_worker.log'
+        self.proc = None; self.info = {}; self.arranques = 0
+        self.start()
+
+    def start(self):
+        import subprocess
+        self.close()
+        self.arranques += 1
+        self._log = self.log.open('a', encoding='utf-8')
+        self.proc = subprocess.Popen([self.python, str(self.script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=self._log, text=True, bufsize=1, env={**os.environ, **self.env})
+        self._enviar({'kwargs': self.kwargs})
+        self.info = self._recibir(self.timeout_inicio)
+        if 'error' in self.info:
+            raise PaddleWorkerError('PaddleOCR no pudo iniciarse en ' + self.python + ': ' + self.info['error'])
+
+    def _enviar(self, obj):
+        try:
+            self.proc.stdin.write(json.dumps(obj) + '\n'); self.proc.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            raise PaddleWorkerError('El proceso de PaddleOCR no acepta datos (' + str(e) + '). Revisa ' + str(self.log)) from None
+
+    def _recibir(self, timeout):
+        import select
+        listo, _, _ = select.select([self.proc.stdout], [], [], timeout)
+        if not listo:
+            self.close()
+            raise PaddleWorkerError(f'PaddleOCR no respondió en {timeout} s. Revisa ' + str(self.log))
+        line = self.proc.stdout.readline()
+        if not line:
+            codigo = self.proc.poll()
+            raise PaddleWorkerError(f'El proceso de PaddleOCR terminó (código {codigo}; 139 = segmentation fault). Revisa ' + str(self.log))
+        return json.loads(line)
+
+    def read(self, im):
+        """Detecciones [{'box','text','score'}] de una imagen PIL."""
+        ruta = self.dir / (uuid.uuid4().hex + '.png')
+        try:
+            im.convert('RGB').save(ruta, 'PNG')
+            self._enviar({'path': str(ruta)})
+            resp = self._recibir(self.timeout_lectura)
+        finally:
+            ruta.unlink(missing_ok=True)
+        if 'error' in resp:
+            raise ValueError('PaddleOCR: ' + resp['error'])
+        return resp['rows']
+
+    def vivo(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def close(self):
+        if self.proc is not None:
+            try:
+                if self.proc.poll() is None:
+                    self._enviar({'cmd': 'exit'})
+                    self.proc.wait(timeout=10)
+            except Exception:
+                pass
+            if self.proc.poll() is None:
+                self.proc.kill()
+            self.proc = None
+            try:
+                self._log.close()
+            except Exception:
+                pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 class MotorOCR:
     """Detector de texto impreso (PaddleOCR o EasyOCR) + TrOCR manuscrito + VLM opcional."""
     def __init__(self, motor='auto', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
-                 paddle_gpu=False, modo_rapido=False, cpu_threads=None, vlm=None, orientacion_auto=False):
+                 paddle_gpu=False, modo_rapido=False, cpu_threads=None, vlm=None, orientacion_auto=False,
+                 paddle_python=None):
         """Carga los modelos una sola vez.
 
-        motor: 'auto' prueba PaddleOCR en un subproceso y, si no puede inferir
-            (p. ej. caída en Python 3.13), usa EasyOCR; 'paddle' o 'easyocr' lo fijan.
-            Se aceptan los nombres antiguos 'paddle_trocr' y 'easyocr'.
+        motor: 'auto' elige el detector impreso en este orden: PaddleOCR en el intérprete
+            aislado (paddle_python, si existe y supera una prueba), PaddleOCR en este proceso
+            (si supera la prueba) y, en último término, EasyOCR. 'paddle_aislado', 'paddle'
+            y 'easyocr' lo fijan. Se aceptan los nombres antiguos 'paddle_trocr' y 'easyocr'.
+        paddle_python: intérprete del entorno aislado (p. ej. /content/paddle_env/bin/python,
+            Python 3.11) donde PaddleOCR corre en un proceso aparte: una caída no afecta al
+            cuaderno, se reinicia una vez y, si vuelve a caer, se pasa a EasyOCR.
         gpu: usa CUDA para EasyOCR, TrOCR y el VLM si está disponible.
         paddle_gpu: intenta ejecutar PaddleOCR en GPU (requiere paddlepaddle-gpu);
             si falla, vuelve a CPU y lo informa.
@@ -667,28 +828,45 @@ class MotorOCR:
         orientacion_auto: PaddleOCR corrige fotos giradas 90/180/270 grados.
         """
         motor = {'paddle_trocr': 'paddle'}.get(motor, motor)
-        if motor not in ('auto', 'paddle', 'easyocr'):
-            raise ValueError('Motor desconocido: ' + str(motor) + ". Usa 'auto', 'paddle' o 'easyocr'.")
+        if motor not in ('auto', 'paddle', 'paddle_aislado', 'easyocr'):
+            raise ValueError('Motor desconocido: ' + str(motor) + ". Usa 'auto', 'paddle_aislado', 'paddle' o 'easyocr'.")
+        if motor == 'paddle_aislado' and not paddle_python:
+            raise ValueError("motor='paddle_aislado' requiere paddle_python (intérprete del entorno aislado).")
         if vlm not in (None, '', *MODELOS_VLM):
             raise ValueError('VLM desconocido: ' + str(vlm) + '. Opciones: ' + ', '.join(MODELOS_VLM))
         import torch
-        self.paddle = None; self.reader = None; self.trocr = None; self.vlm = None
+        self.paddle = None; self.paddle_worker = None; self.reader = None; self.trocr = None; self.vlm = None
+        self.caidas_paddle = 0
         self.opciones = dict(motor=motor, gpu=gpu, trocr_model=trocr_model, paddle_gpu=paddle_gpu,
                              modo_rapido=modo_rapido, cpu_threads=cpu_threads, vlm=vlm or None,
-                             orientacion_auto=orientacion_auto)
+                             orientacion_auto=orientacion_auto, paddle_python=paddle_python or None)
         self.gpu = bool(gpu and torch.cuda.is_available())
+        self.paddle_kwargs = kwargs_paddle(modo_rapido, cpu_threads, orientacion_auto)
+        self.paddle_kwargs['device'] = 'gpu' if paddle_gpu else 'cpu'
         detector = motor
         if motor == 'auto':
-            ok, motivo = probar_paddle()
-            detector = 'paddle' if ok else 'easyocr'
-            if not ok:
-                print('PaddleOCR no puede inferir en este entorno (' + motivo + '); se usará EasyOCR.')
-        if detector == 'paddle':
+            detector = 'easyocr'
+            if paddle_python:
+                ok, motivo = probar_paddle(python=paddle_python, kwargs=self.paddle_kwargs)
+                if ok:
+                    detector = 'paddle_aislado'
+                else:
+                    print('PaddleOCR no pudo inferir en el entorno aislado ' + paddle_python + ' (' + motivo + ').')
+            if detector == 'easyocr':
+                ok, motivo = probar_paddle(kwargs=self.paddle_kwargs)
+                if ok:
+                    detector = 'paddle'
+                else:
+                    print('PaddleOCR no puede inferir en este proceso (' + motivo + '); se usará EasyOCR.')
+        if detector == 'paddle_aislado':
+            self.paddle_worker = PaddleWorker(paddle_python, self.paddle_kwargs)
+            self.paddle_device = self.paddle_kwargs['device']
+            self.detector_nombre = ('PaddleOCR PP-OCRv5' + (' mobile-det' if modo_rapido else '') + ' (' + self.paddle_device
+                                    + ', proceso aislado Python ' + str(self.paddle_worker.info.get('python', '?')) + ')')
+        elif detector == 'paddle':
             self._cargar_paddle(paddle_gpu, modo_rapido, cpu_threads, orientacion_auto)
         else:
-            import easyocr
-            self.reader = easyocr.Reader(['es', 'en'], gpu=self.gpu)
-            self.detector_nombre = 'EasyOCR (' + ('gpu' if self.gpu else 'cpu') + ')'
+            self._activar_easyocr()
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
         self.trocr_device = 'cuda' if self.gpu else 'cpu'
         self.processor = TrOCRProcessor.from_pretrained(trocr_model)
@@ -715,18 +893,14 @@ class MotorOCR:
             print('AVISO: no se pudo cargar el lector VLM ' + model_name + '. Se continúa con TrOCR como único lector '
                   'manuscrito, así que la confianza ALTA no será alcanzable en esta pasada. Motivo: ' + self.vlm_error)
 
+    def _activar_easyocr(self):
+        import easyocr
+        self.reader = easyocr.Reader(['es', 'en'], gpu=self.gpu)
+        self.detector_nombre = 'EasyOCR (' + ('gpu' if self.gpu else 'cpu') + ')'
+
     def _cargar_paddle(self, paddle_gpu, modo_rapido, cpu_threads, orientacion_auto):
         from paddleocr import PaddleOCR
-        paddle_kwargs = dict(use_doc_orientation_classify=bool(orientacion_auto), use_doc_unwarping=False,
-                             use_textline_orientation=False, enable_mkldnn=False,
-                             cpu_threads=int(cpu_threads or os.cpu_count() or 2))
-        if modo_rapido:
-            # Al nombrar modelos, PaddleOCR ignora lang/ocr_version: se fijan los dos.
-            # lang='es' equivale a PP-OCRv5_server_det + latin_PP-OCRv5_mobile_rec.
-            paddle_kwargs.update(text_detection_model_name='PP-OCRv5_mobile_det',
-                                 text_recognition_model_name='latin_PP-OCRv5_mobile_rec')
-        else:
-            paddle_kwargs.update(lang='es', ocr_version='PP-OCRv5')
+        paddle_kwargs = kwargs_paddle(modo_rapido, cpu_threads, orientacion_auto)
         self.paddle_device = 'cpu'
         if paddle_gpu:
             try:
@@ -766,6 +940,23 @@ class MotorOCR:
     def read(self, im, digits=False):
         """Detecciones [{'box','text','score'}] en coordenadas de la imagen recibida."""
         import numpy as np
+        if self.paddle_worker is not None:
+            try:
+                return self.paddle_worker.read(im)
+            except PaddleWorkerError as e:
+                self.caidas_paddle += 1
+                if self.caidas_paddle <= 2:
+                    print(f'AVISO: el proceso de PaddleOCR se cayó ({e}). Se reinicia (intento {self.caidas_paddle}).')
+                    try:
+                        self.paddle_worker.start()
+                        return self.paddle_worker.read(im)
+                    except PaddleWorkerError as e2:
+                        self.caidas_paddle += 1
+                        e = e2
+                print('AVISO: PaddleOCR volvió a caer (' + str(e)[:160] + '). Se pasa a EasyOCR para el resto de la pasada.')
+                self.paddle_worker.close(); self.paddle_worker = None
+                self._activar_easyocr()
+                self.nombre = self.nombre.replace(self.nombre.split(' + ')[0], self.detector_nombre, 1)
         if self.paddle is not None:
             # Paddle recibe matrices BGR; PIL entrega RGB.
             output = []

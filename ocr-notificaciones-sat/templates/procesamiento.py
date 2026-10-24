@@ -1,7 +1,7 @@
 # @title 4. Procesar todas las fotografías pendientes
 LIMITE = 0  # @param {type:"integer"}
 REINTENTAR_ERRORES = False  # @param {type:"boolean"}
-MOTOR = 'auto'  # @param ["auto", "paddle", "easyocr"]
+MOTOR = 'auto'  # @param ["auto", "paddle_aislado", "paddle", "easyocr"]
 PADDLE_GPU = False  # @param {type:"boolean"}
 MODO_RAPIDO = False  # @param {type:"boolean"}
 LECTOR_VLM = True  # @param {type:"boolean"}
@@ -13,7 +13,8 @@ if 'proyecto' not in globals():
 pendientes = proyecto.pendientes(REINTENTAR_ERRORES)
 if pendientes:
     opciones = dict(motor=MOTOR, gpu=torch.cuda.is_available(), paddle_gpu=PADDLE_GPU, modo_rapido=MODO_RAPIDO,
-                vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO)
+                vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO,
+                paddle_python=globals().get('PADDLE_PYTHON'))
     if 'motor' not in globals() or any(getattr(motor, 'opciones', {}).get(k) != v for k, v in opciones.items() if k != 'gpu'):
         print('Cargando modelos. El primer uso los descarga (o los lee de la caché en Drive).')
         motor = MotorOCR(**opciones)

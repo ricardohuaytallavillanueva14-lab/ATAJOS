@@ -2,13 +2,14 @@
 MUESTRA = 200  # @param {type:"integer"}
 SEMILLA = 2026  # @param {type:"integer"}
 SONDEO_FORMATO = True  # @param {type:"boolean"}
-MOTOR = 'auto'  # @param ["auto", "paddle", "easyocr"]
+MOTOR = 'auto'  # @param ["auto", "paddle_aislado", "paddle", "easyocr"]
 PADDLE_GPU = False  # @param {type:"boolean"}
 MODO_RAPIDO = False  # @param {type:"boolean"}
 LECTOR_VLM = True  # @param {type:"boolean"}
 ORIENTACION_AUTO = False  # @param {type:"boolean"}
 # Procesa una muestra repartida entre carpetas para medir velocidad y calidad de lectura.
-# MOTOR auto prueba PaddleOCR en un subproceso y, si se cae (Python 3.13), usa EasyOCR en GPU.
+# MOTOR auto: PaddleOCR en el entorno aislado (celda 1) si supera una prueba; si no, PaddleOCR en este proceso; si no, EasyOCR.
+#   Si el proceso de PaddleOCR se cae durante la pasada, se reinicia una vez y luego se pasa a EasyOCR sin perder avances.
 # PADDLE_GPU requiere paddlepaddle-gpu; si no está disponible, vuelve a CPU automáticamente.
 # Con unas 200 fotos, parte corresponderá a filas que ya tienen F: sirven de patrón para medir el acierto real.
 # SONDEO_FORMATO recorre todas las fotos sin OCR (orientación, tamaño, carpeta) y guarda sondeo_formato_*.json.
@@ -23,7 +24,8 @@ if MUESTRA < 1:
 if SONDEO_FORMATO:
     sondeo = proyecto.sondeo_formato()
 opciones = dict(motor=MOTOR, gpu=torch.cuda.is_available(), paddle_gpu=PADDLE_GPU, modo_rapido=MODO_RAPIDO,
-                vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO)
+                vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO,
+                paddle_python=globals().get('PADDLE_PYTHON'))
 if 'motor' not in globals() or any(getattr(motor, 'opciones', {}).get(k) != v for k, v in opciones.items() if k != 'gpu'):
     print('Cargando modelos. El primer uso los descarga (o los lee de la caché en Drive).')
     motor = MotorOCR(**opciones)

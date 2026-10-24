@@ -64,7 +64,7 @@ El repositorio solo contiene software y documentación. Fotografías, Excel, lec
 - **Una sola lectura por foto**: la huella se calcula sobre los mismos bytes que recibe el OCR.
 - **Progreso y estimaciones**: barra `tqdm`, segundos por foto, horas restantes y resumen por lote.
 - **Celda de prueba** con muestra reproducible repartida entre carpetas.
-- **Motor automático**: `MOTOR = auto` comprueba PaddleOCR en un subproceso (una caída no afecta al cuaderno) y usa EasyOCR en GPU si falla, como ocurre con Python 3.13 en Colab; la celda 1 retira `langchain`, que rompe `paddlex`.
+- **PaddleOCR en un entorno aislado**: paddlepaddle 3.2 se cae (segmentation fault) al inferir con el Python 3.13 de Colab. La celda 1 crea `/content/paddle_env` con Python 3.11 mediante `uv`, instala allí PaddleOCR y el cuaderno lo ejecuta en un proceso aparte (`PaddleWorker`) que recibe cada recorte y devuelve las detecciones. Si ese proceso se cae, el cuaderno no muere: lo reinicia una vez y, si vuelve a caer, pasa a EasyOCR sin perder avances. `MOTOR = auto` prueba primero el entorno aislado, después PaddleOCR en el propio proceso y por último EasyOCR. La celda 1 también retira `langchain`, que rompe `paddlex`.
 - **Opciones de rendimiento**: `MODO_RAPIDO` (detector PP-OCRv5 mobile + reconocedor latino), `PADDLE_GPU` (requiere `paddlepaddle-gpu`; vuelve a CPU si falla) y `ORIENTACION_AUTO` para fotos giradas. TrOCR procesa las vistas del recorte en un solo lote.
 - **Alcance configurable** con `configurar(hoja, fecha_emision)`, aplicado por igual al índice, la evaluación y la escritura del XLSX.
 - **Compatibilidad**: las carpetas de resultados creadas con la versión anterior se abren sin cambios.

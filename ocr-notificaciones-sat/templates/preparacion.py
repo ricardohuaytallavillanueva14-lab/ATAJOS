@@ -5,8 +5,12 @@ RUTA_RESULTADOS = '/content/drive/MyDrive/01_SAT_Huamanga/REC_2026_02SEP_RESULTA
 FOTOS_ESPERADAS = 3996  # @param {type:"integer"}
 CACHE_MODELOS_EN_DRIVE = True  # @param {type:"boolean"}
 REINSTALAR_DEPENDENCIAS = False  # @param {type:"boolean"}
+PADDLE_AISLADO = True  # @param {type:"boolean"}
+PYTHON_PADDLE = '3.11'  # @param ["3.11", "3.12"]
 # FOTOS_ESPERADAS = 0 omite la comprobación de cantidad (lotes nuevos o parciales).
 # CACHE_MODELOS_EN_DRIVE guarda TrOCR y PaddleOCR en Drive para no descargarlos en cada sesión.
+# PADDLE_AISLADO crea /content/paddle_env con PYTHON_PADDLE (3.11) e instala allí PaddleOCR: corre en un proceso
+#   aparte, así que la caída que da paddlepaddle con el Python 3.13 de Colab no afecta al cuaderno.
 
 from pathlib import Path, PureWindowsPath
 import importlib.metadata, os, sys, subprocess, time
@@ -110,6 +114,32 @@ if inventario.exists():
         raise RuntimeError('La subida no coincide con el inventario. Revisa los archivos indicados.')
 else:
     print('No hay inventario_fotos.xlsx: solo se comprobó el total de imágenes.')
+
+# Entorno aislado para PaddleOCR (otro intérprete, proceso aparte). Idempotente: si ya existe, solo lo comprueba.
+PADDLE_PYTHON = None
+if PADDLE_AISLADO:
+    entorno = Path('/content/paddle_env'); PADDLE_PYTHON = str(entorno / 'bin' / 'python')
+    def _ok_paddle_env():
+        return Path(PADDLE_PYTHON).exists() and subprocess.run([PADDLE_PYTHON, '-c', 'import paddle, paddleocr'], capture_output=True).returncode == 0
+    if REINSTALAR_DEPENDENCIAS or not _ok_paddle_env():
+        print(f'Creando el entorno aislado de PaddleOCR con Python {PYTHON_PADDLE} (2 a 4 minutos)...', flush=True)
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'uv'], check=True)
+        if REINSTALAR_DEPENDENCIAS and entorno.exists():
+            import shutil; shutil.rmtree(entorno)
+        subprocess.run([sys.executable, '-m', 'uv', 'venv', str(entorno), '--python', PYTHON_PADDLE, '--quiet'], check=True)
+        proc = subprocess.Popen([sys.executable, '-m', 'uv', 'pip', 'install', '--python', PADDLE_PYTHON, '--quiet',
+                                 'paddlepaddle==3.2.0', 'paddleocr==3.3.2', 'Pillow>=10,<13'],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        salida_uv = proc.communicate()[0]
+        if proc.returncode != 0:
+            print(salida_uv[-2000:])
+            raise RuntimeError('No se pudo instalar PaddleOCR en el entorno aislado. Comparte las líneas anteriores.')
+    version_aislada = subprocess.run([PADDLE_PYTHON, '-c', 'import sys, paddle, paddleocr; print(sys.version.split()[0], paddle.__version__, paddleocr.__version__)'],
+                                     capture_output=True, text=True).stdout.strip()
+    print('Entorno aislado de PaddleOCR listo:', PADDLE_PYTHON, '|', version_aislada)
+    print('Los modelos de PaddleOCR se descargarán al primer uso (celda 3 o 4) y quedarán en la caché de Drive.')
+else:
+    print('PADDLE_AISLADO desactivado: se intentará PaddleOCR en este proceso y, si falla, EasyOCR.')
 
 import torch
 print('GPU para TrOCR:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No disponible; se utilizará CPU (mucho más lento).')

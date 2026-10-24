@@ -535,6 +535,70 @@ class EmparejamientoTests(ProyectoBase):
             con=p.conciliar(guardar=False)
         self.assertEqual(con['expedientes_fuera_del_lote'],1)
 
+class PaddleWorkerTests(unittest.TestCase):
+    """El trabajador se prueba en modo simulado (sin modelos): protocolo, caída, reinicio y relevo a EasyOCR."""
+    FAKE={'PADDLE_WORKER_FAKE':'1'}
+    def test_protocolo_caida_y_reinicio(self):
+        w=c.PaddleWorker(sys.executable,{'lang':'es'},env=self.FAKE)
+        try:
+            self.assertTrue(w.info['ready']); self.assertTrue(w.info['fake']); self.assertTrue(w.vivo())
+            rows=w.read(Image.new('RGB',(20,20),'white'))
+            self.assertEqual(len(rows),1); self.assertTrue(rows[0]['text'].startswith('FAKE')); self.assertEqual(len(rows[0]['box']),4)
+            w._enviar({'cmd':'crash'})
+            with self.assertRaises(c.PaddleWorkerError) as cm:
+                w.read(Image.new('RGB',(20,20),'white'))
+            self.assertIn('139',str(cm.exception)); self.assertFalse(w.vivo())
+            w.start(); self.assertTrue(w.vivo()); self.assertEqual(w.arranques,2)
+            self.assertEqual(len(w.read(Image.new('RGB',(20,20),'white'))),1)
+        finally:
+            w.close()
+        self.assertFalse(w.vivo())
+    def test_arranque_fallido_se_informa(self):
+        # Un intérprete sin paddleocr no cuelga: responde con error y PaddleWorker lo convierte en excepción.
+        with self.assertRaises(c.PaddleWorkerError) as cm:
+            c.PaddleWorker(sys.executable,{'lang':'es'},env={'PADDLE_WORKER_FAKE':'','PYTHONPATH':'/nonexistent','PYTHONNOUSERSITE':'1','PYTHONSAFEPATH':'1'},timeout_inicio=60) if not _paddle_disponible() else _simular_fallo()
+        self.assertIn('PaddleOCR no pudo iniciarse',str(cm.exception))
+    def test_probar_paddle_con_interprete_inexistente(self):
+        ok,motivo=c.probar_paddle(python='/ruta/inexistente/python',kwargs={'lang':'es'})
+        self.assertFalse(ok); self.assertIn('no se pudo ejecutar',motivo)
+    def test_motor_releva_a_easyocr_tras_dos_caidas(self):
+        m=c.MotorOCR.__new__(c.MotorOCR)
+        m.paddle=None; m.reader=None; m.caidas_paddle=0; m.gpu=False; m.nombre='PaddleOCR PP-OCRv5 (cpu, proceso aislado) + trocr'
+        m.paddle_worker=c.PaddleWorker(sys.executable,{'lang':'es'},env=self.FAKE)
+        activaciones=[]
+        def falso_easyocr():
+            activaciones.append(1); m.detector_nombre='EasyOCR (cpu)'
+            class R:
+                def readtext(self,arr,**kw): return [([[0,0],[5,0],[5,5],[0,5]],'EASY',0.9)]
+            m.reader=R()
+        m._activar_easyocr=falso_easyocr
+        im=Image.new('RGB',(20,20),'white')
+        self.assertTrue(m.read(im)[0]['text'].startswith('FAKE'))
+        m.paddle_worker._enviar({'cmd':'crash'})
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rows=m.read(im)                       # primera caída: reinicio y lectura correcta
+        self.assertTrue(rows[0]['text'].startswith('FAKE')); self.assertEqual(m.caidas_paddle,1); self.assertIn('Se reinicia',out.getvalue())
+        m.paddle_worker._enviar({'cmd':'crash'})
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows=m.read(im)                       # segunda caída: reinicio otra vez
+        self.assertTrue(rows[0]['text'].startswith('FAKE')); self.assertEqual(m.caidas_paddle,2)
+        m.paddle_worker._enviar({'cmd':'crash'})
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rows=m.read(im)                       # tercera: relevo a EasyOCR
+        self.assertEqual(rows[0]['text'],'EASY'); self.assertIsNone(m.paddle_worker); self.assertEqual(activaciones,[1])
+        self.assertIn('Se pasa a EasyOCR',out.getvalue()); self.assertTrue(m.nombre.startswith('EasyOCR (cpu) + trocr'))
+
+def _paddle_disponible():
+    try:
+        import paddleocr  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+def _simular_fallo():
+    # Con paddleocr instalado, forzamos un error de arranque pasando un argumento inválido al constructor.
+    return c.PaddleWorker(sys.executable,{'argumento_invalido':1},env={'PADDLE_WORKER_FAKE':''},timeout_inicio=120)
+
 class NotebookTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -560,6 +624,8 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('EXCEL_DRIVE',''.join(cells[1]['source']))
         self.assertIn('LECTOR_VLM',''.join(cells[3]['source']))
         self.assertIn('langchain',''.join(cells[0]['source']))
+        self.assertIn('PADDLE_AISLADO',''.join(cells[0]['source']))
+        self.assertIn('paddle_python',''.join(cells[3]['source']))
         self.assertIn('medir_acierto',''.join(cells[2]['source']))
         self.assertIn('MUESTRA = 200',''.join(cells[2]['source']))
     def test_notebook_matches_templates(self):
