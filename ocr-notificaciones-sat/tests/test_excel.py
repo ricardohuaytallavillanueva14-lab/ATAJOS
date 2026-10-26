@@ -89,7 +89,7 @@ class MotorFalso:
         with Image.open(src) as im: im.load()
         return dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',nombre='PERSONA FICTICIA',fecha_notificacion='15/09/2026',
                     fecha_emision='02/09/2026',fecha_texto=None,observaciones=''),{'motor':self.nombre,'tipo':'REC','roi_fecha':[0.5,0.7,0.7,0.75],
-                    'orientacion':'vertical','metodo_recuadro':'rotulos_fecha_y_hora'}
+                    'orientacion':'vertical','metodo_recuadro':'rotulos_fecha_y_hora','recuadros':[{'roi':[0.5,0.7,0.7,0.75],'metodo':'rotulos_fecha_y_hora'}]}
 
 class ProyectoBase(unittest.TestCase):
     def setUp(self):
@@ -400,17 +400,26 @@ class LocalizacionTests(unittest.TestCase):
         rows=[caja(1000,1900,1500,1930,'PECHA DE NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
         self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1930,1990))
-        # Solo la palabra NOTIFICACION, con el rótulo HORA debajo: se acepta.
+        # Solo la palabra NOTIFICACION, con el rótulo HORA debajo: es el rótulo de FECHA.
         rows=[caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
-        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1930,1990))
+        self.assertEqual(metodo,'rotulo_notificacion_fecha'); self.assertEqual((roi[1],roi[3]),(1930,1990))
         # Dos rótulos leídos solo como NOTIFICACION: el de arriba es FECHA y el de abajo HORA.
         rows=[caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'NOTIFICACION:')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
-        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1930,1990))
-        # NOTIFICACION suelto y nada más: ambiguo, no se recorta.
-        roi,metodo=c.localizar_recuadro_fecha([caja(1000,1900,1500,1930,'NOTIFICACION:')],self.W,self.H)
-        self.assertIsNone(roi); self.assertIn('ambiguo',metodo)
+        self.assertEqual(metodo,'rotulo_notificacion_fecha'); self.assertEqual((roi[1],roi[3]),(1930,1990))
+        # NOTIFICACION suelto con FOLIOS debajo: es el rótulo de HORA, la casilla está encima.
+        rows=[caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'FOLIOS ENTREGADOS:')]
+        roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
+        self.assertEqual(metodo,'rotulo_notificacion_hora'); self.assertEqual(roi[3],1900); self.assertLess(roi[1],1900)
+        # NOTIFICACION suelto y nada más: se usa como ancla con las dos casillas (encima y debajo).
+        recs,motivo=c.localizar_recuadros_fecha([caja(1000,1900,1500,1930,'NOTIFICACION:')],self.W,self.H)
+        self.assertEqual([m for _,m in recs],['rotulo_notificacion_ambos']*2)
+        self.assertEqual(recs[0][0][1],1930); self.assertEqual(recs[1][0][3],1900)
+        # NOTIFICACION suelto en la mitad superior de la página no es ancla; junto a EMISIÓN/VENCIMIENTO tampoco.
+        self.assertEqual(c.localizar_recuadros_fecha([caja(1000,300,1500,330,'NOTIFICACION:')],self.W,self.H)[0],[])
+        for texto in ('NOTIFICACION DE EMISION','FECHA DE NOTIFICACION DE VENCIMIENTO'):
+            self.assertEqual(c.localizar_recuadros_fecha([caja(1000,1900,1500,1930,texto)],self.W,self.H)[0],[])
         # Rótulos de otras fechas no se aceptan como ancla.
         for texto in ('FECHA DE EMISION','FECHA DE VENCIMIENTO','FECHA DE EMISION REC','FECHA DE EMISION:','FECHA Y HORA','FECHA:'):
             with self.subTest(texto=texto):
@@ -428,7 +437,8 @@ class LocalizacionTests(unittest.TestCase):
         self.assertEqual(c.fecha_acta_negativa(rows),['2026-09-11'])
         head='EXPEDIENTE COACTIVO : 16-012-000000001-2026-SAT-H/DCC-IPA\nRESOLUCION DE EJECUCION COACTIVA'
         self.assertEqual(c.clasificar_documento(head,rows,self.W,self.H,'16-012-000000001-2026'),'REC')
-        self.assertEqual(c.clasificar_documento(head,[],2480,1748,'16-012-000000001-2026'),'REC_SIN_CARGO')
+        self.assertEqual(c.clasificar_documento(head,[],2480,1748,'16-012-000000001-2026'),'REC_SIN_CARGO')      # horizontal: media página
+        self.assertEqual(c.clasificar_documento(head,[],self.W,self.H,'16-012-000000001-2026'),'REC_CARGO_NO_UBICADO')  # vertical: rótulo no leído
         self.assertEqual(c.clasificar_documento('texto suelto',rows,self.W,self.H,None),'CARGO_SIN_ENCABEZADO')
         self.assertEqual(c.clasificar_documento('AVISO PREVIO DE NOTIFICACION',[],3307,2330,None),'ANEXO')
         self.assertEqual(c.clasificar_documento('CEDULON',[],3307,2330,None),'ANEXO')
@@ -561,7 +571,7 @@ class PaddleWorkerTests(unittest.TestCase):
     def test_probar_paddle_con_interprete_inexistente(self):
         ok,motivo=c.probar_paddle(python='/ruta/inexistente/python',kwargs={'lang':'es'})
         self.assertFalse(ok); self.assertIn('no se pudo ejecutar',motivo)
-    def test_motor_releva_a_easyocr_tras_dos_caidas(self):
+    def test_motor_releva_a_easyocr_en_la_primera_caida(self):
         m=c.MotorOCR.__new__(c.MotorOCR)
         m.paddle=None; m.reader=None; m.caidas_paddle=0; m.gpu=False; m.nombre='PaddleOCR PP-OCRv5 (cpu, proceso aislado) + trocr'
         m.paddle_worker=c.PaddleWorker(sys.executable,{'lang':'es'},env=self.FAKE)
@@ -576,17 +586,16 @@ class PaddleWorkerTests(unittest.TestCase):
         self.assertTrue(m.read(im)[0]['text'].startswith('FAKE'))
         m.paddle_worker._enviar({'cmd':'crash'})
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            rows=m.read(im)                       # primera caída: reinicio y lectura correcta
-        self.assertTrue(rows[0]['text'].startswith('FAKE')); self.assertEqual(m.caidas_paddle,1); self.assertIn('Se reinicia',out.getvalue())
-        m.paddle_worker._enviar({'cmd':'crash'})
-        with contextlib.redirect_stdout(io.StringIO()):
-            rows=m.read(im)                       # segunda caída: reinicio otra vez
-        self.assertTrue(rows[0]['text'].startswith('FAKE')); self.assertEqual(m.caidas_paddle,2)
-        m.paddle_worker._enviar({'cmd':'crash'})
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            rows=m.read(im)                       # tercera: relevo a EasyOCR
+            rows=m.read(im)                       # primera caída: relevo inmediato, sin reintentar Paddle
         self.assertEqual(rows[0]['text'],'EASY'); self.assertIsNone(m.paddle_worker); self.assertEqual(activaciones,[1])
-        self.assertIn('Se pasa a EasyOCR',out.getvalue()); self.assertTrue(m.nombre.startswith('EasyOCR (cpu) + trocr'))
+        self.assertEqual(m.caidas_paddle,1); self.assertIn('Se pasa a EasyOCR',out.getvalue()); self.assertNotIn('Se reinicia',out.getvalue())
+        self.assertTrue(m.nombre.startswith('EasyOCR (cpu) + trocr'))
+        self.assertEqual(m.read(im)[0]['text'],'EASY')
+    def test_kwargs_del_aislado(self):
+        m=c.MotorOCR.__new__(c.MotorOCR); m.paddle_kwargs=c.kwargs_paddle(); m.paddle_kwargs['device']='cpu'
+        kw=m.paddle_kwargs_aislado()
+        self.assertTrue(kw['enable_mkldnn']); self.assertEqual((kw['text_det_limit_side_len'],kw['text_det_limit_type']),(960,'max'))
+        self.assertFalse(m.paddle_kwargs['enable_mkldnn'])
 
 def _paddle_disponible():
     try:
@@ -598,6 +607,112 @@ def _paddle_disponible():
 def _simular_fallo():
     # Con paddleocr instalado, forzamos un error de arranque pasando un argumento inválido al constructor.
     return c.PaddleWorker(sys.executable,{'argumento_invalido':1},env={'PADDLE_WORKER_FAKE':''},timeout_inicio=120)
+
+def pagina_sintetica(con_rotulo=True, tinta=(40,60,200), fecha='15/09/2026'):
+    """Página REC vertical de 1000x1400: encabezado impreso (negro) y fecha manuscrita (azul) en la zona del cargo."""
+    from PIL import ImageFont
+    im=Image.new('RGB',(1000,1400),'white'); dr=ImageDraw.Draw(im)
+    try: fuente=ImageFont.load_default(size=34)
+    except TypeError: fuente=ImageFont.load_default()
+    dr.text((60,60),'EXPEDIENTE COACTIVO : 16-012-000000001-2026-SAT-H/DCC-IPA',fill='black',font=fuente)
+    dr.line((60,950,940,950),fill='black',width=2)
+    if con_rotulo:
+        dr.text((480,958),'FECHA DE NOTIFICACION:',fill='black',font=fuente)
+    dr.text((500,1000),fecha,fill=tinta,font=fuente)
+    dr.line((60,1060,940,1060),fill='black',width=2)
+    return im
+
+class MotorSintetico:
+    """Motor con lectores simulados sobre imágenes sintéticas.
+
+    read(): devuelve rótulos solo para el pie de página (según la variante) y nada para los recortes.
+    TrOCR y el VLM 'leen' la fecha únicamente cuando el recorte contiene tinta azul.
+    """
+    def __init__(self, filas_pie, con_vlm=False, fecha='15/09/2026', vlm_localizador=None):
+        self.filas_pie=filas_pie; self.fecha=fecha; self.nombre='sintetico'
+        self.paddle=None; self.paddle_worker=None; self.reader=None; self.trocr=object()
+        self.vlm=object() if con_vlm else None; self.vlm_localizador=vlm_localizador; self.llamadas_vlm=[]
+    def read(self, im, digits=False):
+        if im.size==(1000,448): return []           # encabezado: parse_header no necesita filas, usamos el texto
+        if im.size==(1000,700): return self.filas_pie
+        return []
+    def _ve_tinta(self, im): return c.vista_tinta(im)[0] is not None
+    def read_handwritten_lote(self, imgs): return [self.fecha if self._ve_tinta(im) else 'nada' for im in imgs]
+    def read_vlm(self, im, prompt=None, max_pixels=None):
+        self.llamadas_vlm.append((im.size,prompt is not None))
+        if prompt is not None: return self.vlm_localizador or 'ILEGIBLE'
+        return self.fecha if self._ve_tinta(im) else 'ILEGIBLE'
+    leer=c.MotorOCR.leer; VLM_PROMPT_LOCALIZADOR=c.MotorOCR.VLM_PROMPT_LOCALIZADOR
+
+class ImagenesSinteticasTests(unittest.TestCase):
+    def guardar(self, im):
+        self.temp=tempfile.TemporaryDirectory(); ruta=Path(self.temp.name)/'pagina.png'; im.save(ruta); return ruta
+    def tearDown(self):
+        if hasattr(self,'temp'): self.temp.cleanup()
+    def encabezado(self):
+        # parse_header() recibe el texto de las detecciones del encabezado; aquí lo simulamos con una fila.
+        return [caja(60,60,900,100,'EXPEDIENTE COACTIVO : 16-012-000000001-2026-SAT-H/DCC-IPA')]
+    def motor(self, filas_pie, **kw):
+        m=MotorSintetico(filas_pie,**kw)
+        cabecera=self.encabezado()
+        original_read=m.read
+        m.read=lambda im,digits=False: cabecera if im.size==(1000,448) else original_read(im,digits)
+        return m
+    def test_1_rotulo_ambiguo_como_ancla(self):
+        ruta=self.guardar(pagina_sintetica())
+        # El pie se recorta desde el 50 % (y=700): el rótulo 'NOTIFICACION:' queda en y 258-290 del recorte.
+        pie=[caja(480,258,760,290,'NOTIFICACION:')]
+        d,ev=self.motor(pie).leer(ruta)
+        self.assertEqual(ev['tipo'],'REC'); self.assertEqual([r['metodo'] for r in ev['recuadros']],['rotulo_notificacion_ambos']*2)
+        self.assertEqual(d['fecha_notificacion'],'2026-09-15'); self.assertEqual(ev['confianza'],'MEDIA')
+        self.assertNotIn('recuadro_por_posicion',ev)
+        vistas={v['vista']:v['fechas'] for v in ev['variantes_fecha']}
+        self.assertEqual(vistas['trocr_color'],['2026-09-15']); self.assertEqual(vistas['r2_trocr_color'],[])   # la casilla de encima no tiene fecha
+        # Con el VLM coincidiendo sobre el recuadro anclado por rótulo, ALTA sí es alcanzable.
+        d,ev=self.motor(pie,con_vlm=True).leer(ruta)
+        self.assertEqual((d['fecha_notificacion'],ev['confianza']),('2026-09-15','ALTA'))
+    def test_2_respaldo_por_posicion_nunca_alta(self):
+        ruta=self.guardar(pagina_sintetica(con_rotulo=False))
+        m=self.motor([],con_vlm=True)
+        d,ev=m.leer(ruta)
+        self.assertEqual(ev['tipo'],'REC_CARGO_NO_UBICADO'); self.assertEqual(ev['recuadros'],[])
+        self.assertIn('recuadro_por_posicion',ev); self.assertIn('Respaldo',ev['metodo_recuadro']); self.assertGreaterEqual(ev['bandas_tinta'],1)
+        self.assertEqual(d['fecha_notificacion'],'2026-09-15'); self.assertIn('recorte por posición',d['observaciones'])
+        vistas={v['vista']:v for v in ev['variantes_fecha']}
+        self.assertTrue(vistas['pos1_trocr_color']['por_posicion']); self.assertEqual(vistas['pos1_vlm_color']['fechas'],['2026-09-15'])
+        self.assertEqual(ev['confianza'],'MEDIA')                       # dos lectores manuscritos, pero por posición: nunca ALTA
+        self.assertFalse(any(p for _,p in m.llamadas_vlm))             # con fecha leída no hace falta el localizador
+        self.assertEqual(ev['roi_fecha'],ev['recuadro_por_posicion'])
+    def test_3_vlm_como_localizador(self):
+        # Fecha en tinta negra: no hay bandas de tinta azul, así que se pide al VLM que localice el valor.
+        ruta=self.guardar(pagina_sintetica(con_rotulo=False,tinta=(0,0,0)))
+        m=self.motor([],con_vlm=True,vlm_localizador='16/09/2026')
+        d,ev=m.leer(ruta)
+        self.assertEqual(ev['bandas_tinta'],0)
+        self.assertEqual(d['fecha_notificacion'],'2026-09-16'); self.assertEqual(ev['confianza'],'MEDIA')
+        v=[x for x in ev['variantes_fecha'] if x['vista']=='vlm_mitad_inferior'][0]
+        self.assertTrue(v['por_posicion']); self.assertEqual(v['fechas'],['2026-09-16'])
+        self.assertEqual([p for _,p in m.llamadas_vlm],[True]); self.assertEqual(m.llamadas_vlm[0][0],(1000,770))
+        # Si el localizador responde ILEGIBLE, queda sin fecha y con la observación de completar a mano.
+        m=self.motor([],con_vlm=True,vlm_localizador=None)
+        d,ev=m.leer(ruta)
+        self.assertIsNone(d['fecha_notificacion']); self.assertEqual(ev['confianza'],'SIN_FECHA'); self.assertIn('recorte por posición',d['observaciones'])
+    def test_4_clasificacion_y_media_pagina(self):
+        # Vertical con encabezado y sin rótulo: REC_CARGO_NO_UBICADO (se intenta por posición). Horizontal: REC_SIN_CARGO, sin respaldo.
+        ruta=self.guardar(pagina_sintetica(con_rotulo=False))
+        d,ev=self.motor([]).leer(ruta); self.assertEqual(ev['tipo'],'REC_CARGO_NO_UBICADO'); self.assertIn('recuadro_por_posicion',ev)
+        apaisada=pagina_sintetica(con_rotulo=False).rotate(90,expand=True)
+        ruta2=self.guardar(apaisada)
+        m=self.motor([]); m.read=lambda im,digits=False: self.encabezado()
+        d,ev=m.leer(ruta2)
+        self.assertEqual(ev['tipo'],'REC_SIN_CARGO'); self.assertNotIn('recuadro_por_posicion',ev); self.assertIsNone(d['fecha_notificacion'])
+        self.assertIn('Media página',d['observaciones'])
+    def test_bandas_de_tinta(self):
+        im=Image.new('RGB',(400,200),'white'); dr=ImageDraw.Draw(im)
+        dr.rectangle((50,30,300,50),fill=(40,60,200)); dr.rectangle((50,120,200,150),fill=(40,60,200)); dr.line((0,100,400,100),fill='black',width=3)
+        self.assertEqual(c.bandas_de_tinta(im),[(30,51),(120,151)])
+        self.assertEqual(c.bandas_de_tinta(Image.new('RGB',(50,50),'white')),[])
+        self.assertEqual(c.zona_cargo_por_posicion(1000,1400),(350,728,780,1176))
 
 class NotebookTests(unittest.TestCase):
     def setUp(self):

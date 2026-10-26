@@ -100,18 +100,22 @@ def nivel_confianza(variantes, propuesta):
     Ningún nivel sustituye el cotejo visual: solo ordena y documenta la revisión.
     """
     por_familia = defaultdict(set)
+    firmes = defaultdict(set)   # lecturas sobre un recuadro anclado por rótulo (no por posición)
     for v in variantes:
         familia = familia_lector(v.get('vista'))
         if familia == 'acta':
             continue
         por_familia[familia].update(v.get('fechas') or [])
+        if not v.get('por_posicion'):
+            firmes[familia].update(v.get('fechas') or [])
     distintas = {d for ds in por_familia.values() for d in ds}
     if len(distintas) > 1:
         return 'CONTRADICTORIA', sorted(f for f, ds in por_familia.items() if ds == {propuesta})
     if propuesta is None:
         return 'SIN_FECHA', []
     coinciden = sorted(f for f, ds in por_familia.items() if ds == {propuesta})
-    manuscritos = [f for f in coinciden if f in LECTORES_MANUSCRITOS]
+    # Un recorte por posición puede contener otras cifras del cargo: su coincidencia no basta para ALTA.
+    manuscritos = [f for f in coinciden if f in LECTORES_MANUSCRITOS and firmes.get(f) == {propuesta}]
     return ('ALTA' if len(manuscritos) >= 2 else 'MEDIA'), coinciden
 
 
@@ -557,48 +561,126 @@ def agrupar_lineas(rows, tolerancia=0.6):
     return lineas
 
 
-def localizar_recuadro_fecha(rows, ancho, alto):
-    """Ubica la casilla manuscrita bajo 'FECHA DE NOTIFICACIÓN' aunque el rótulo se lea mal.
+def localizar_recuadros_fecha(rows, ancho, alto):
+    """Ubica la casilla manuscrita de FECHA DE NOTIFICACIÓN aunque el rótulo se lea mal.
 
     rows: detecciones del pie de página con coordenadas en el mismo sistema que ancho/alto.
-    Devuelve (roi (x1,y1,x2,y2), método) o (None, motivo). Estrategias, en orden:
+    Devuelve (lista de (roi (x1,y1,x2,y2), método), motivo). Estrategias, en orden:
     1. Rótulo FECHA (aproximado) y rótulo HORA debajo: casilla entre ambos.
     2. Solo rótulo FECHA: casilla de ~2,6 alturas de línea bajo él.
-    3. Solo rótulo HORA: casilla justo encima, de la misma altura que la de HORA.
+    3. Solo rótulo HORA: casilla justo encima.
+    4. Solo la palabra NOTIFICACIÓN (sin FECHA/HORA) en la mitad inferior: se usa como ancla.
+       Si debajo hay un rótulo HORA es el de FECHA (casilla debajo); si debajo hay FOLIOS es el
+       de HORA (casilla encima); si no se sabe, se devuelven las dos casillas y las lecturas
+       que no sean fechas se descartan solas. Se descarta si la línea menciona EMISIÓN o VENCIMIENTO.
     """
     lineas = agrupar_lineas(rows)
-    fechas = sorted(((parecido_rotulo(l['text'], 'fecha', 'hora'), l) for l in lineas), key=lambda t: -t[0])
-    horas = sorted(((parecido_rotulo(l['text'], 'hora', 'fecha'), l) for l in lineas), key=lambda t: -t[0])
+    def junto_a_otra_fecha(l):
+        t = norm(l['text'])
+        return 'emisi' in t or 'vencim' in t
+    fechas = sorted(((parecido_rotulo(l['text'], 'fecha', 'hora'), l) for l in lineas if not junto_a_otra_fecha(l)), key=lambda t: -t[0])
+    horas = sorted(((parecido_rotulo(l['text'], 'hora', 'fecha'), l) for l in lineas if not junto_a_otra_fecha(l)), key=lambda t: -t[0])
     fecha = fechas[0][1] if fechas and fechas[0][0] > 0 else None
     fecha_ambigua = fecha is not None and fechas[0][0] < 0.65
+    if fecha_ambigua and fecha['y1'] < 0.45 * alto:
+        fecha = None; fecha_ambigua = False
     hora = None
     for score, l in horas:
         if score <= 0:
             break
-        if l is fecha:
+        if l is fecha or (score < 0.65 and l['y1'] < 0.45 * alto):
             continue
         if fecha is None or (l['y1'] > fecha['y2'] and abs(l['x1'] - fecha['x1']) < 0.25 * ancho):
             hora = l; break
-    if fecha_ambigua and hora is None:
-        # Solo se leyó 'NOTIFICACION' suelto: puede ser el rótulo de FECHA o el de HORA.
-        return None, 'Rótulo ambiguo (solo se reconoció NOTIFICACIÓN, sin FECHA/HORA ni rótulo HORA debajo).'
     if fecha is None and hora is None:
-        return None, 'No se localizó ningún rótulo FECHA/HORA DE NOTIFICACIÓN.'
-    if fecha is not None:
-        lh = max(10, fecha['y2'] - fecha['y1'])
-        top = fecha['y2']
+        return [], 'No se localizó ningún rótulo FECHA/HORA DE NOTIFICACIÓN.'
+    def recorte(x1, x2, top, bottom):
+        roi = (max(0, int(x1 - 0.015 * ancho)), max(0, int(top)), min(ancho, int(x2 + 0.02 * ancho)), min(alto, int(bottom)))
+        return roi if roi[3] - roi[1] >= 8 and roi[2] - roi[0] >= 20 else None
+    def debajo(l, objetivo, veces=4):
+        lh = max(10, l['y2'] - l['y1'])
+        for m in lineas:
+            if m is l or not (l['y2'] <= m['y1'] < l['y2'] + lh * veces) or abs(m['x1'] - l['x1']) > 0.25 * ancho:
+                continue
+            if parecido(m['text'], objetivo, umbral=0.6, prefijo=4):
+                return m
+        return None
+    resultados = []
+    if fecha is not None and not fecha_ambigua:
+        lh = max(10, fecha['y2'] - fecha['y1']); top = fecha['y2']
         bottom = hora['y1'] if hora is not None and top < hora['y1'] < top + lh * 6 else min(alto, top + lh * 2.6)
-        x1, x2 = fecha['x1'], fecha['x2']
-        metodo = 'rotulos_fecha_y_hora' if hora is not None else 'rotulo_fecha'
+        roi = recorte(fecha['x1'], fecha['x2'], top, bottom)
+        if roi: resultados.append((roi, 'rotulos_fecha_y_hora' if hora is not None else 'rotulo_fecha'))
+    elif fecha is not None:
+        lh = max(10, fecha['y2'] - fecha['y1'])
+        folios = debajo(fecha, 'foliosentregados')
+        if hora is not None and fecha['y2'] < hora['y1'] < fecha['y2'] + lh * 6:
+            roi = recorte(fecha['x1'], fecha['x2'], fecha['y2'], hora['y1'])
+            if roi: resultados.append((roi, 'rotulo_notificacion_fecha'))
+        elif folios is not None:
+            roi = recorte(fecha['x1'], fecha['x2'], max(0, fecha['y1'] - lh * 2.6), fecha['y1'])
+            if roi: resultados.append((roi, 'rotulo_notificacion_hora'))
+        else:
+            roi = recorte(fecha['x1'], fecha['x2'], fecha['y2'], min(alto, fecha['y2'] + lh * 2.6))
+            if roi: resultados.append((roi, 'rotulo_notificacion_ambos'))
+            roi = recorte(fecha['x1'], fecha['x2'], max(0, fecha['y1'] - lh * 2.6), fecha['y1'])
+            if roi: resultados.append((roi, 'rotulo_notificacion_ambos'))
     else:
         lh = max(10, hora['y2'] - hora['y1'])
-        bottom = hora['y1']; top = max(0, bottom - lh * 2.6)
-        x1, x2 = hora['x1'], hora['x2']
-        metodo = 'rotulo_hora'
-    roi = (max(0, int(x1 - 0.015 * ancho)), max(0, int(top)), min(ancho, int(x2 + 0.02 * ancho)), min(alto, int(bottom)))
-    if roi[3] - roi[1] < 8 or roi[2] - roi[0] < 20:
-        return None, 'El recorte de fecha es demasiado pequeño.'
-    return roi, metodo
+        roi = recorte(hora['x1'], hora['x2'], max(0, hora['y1'] - lh * 2.6), hora['y1'])
+        if roi: resultados.append((roi, 'rotulo_hora'))
+    if not resultados:
+        return [], 'El recorte de fecha es demasiado pequeño.'
+    return resultados, resultados[0][1]
+
+
+def localizar_recuadro_fecha(rows, ancho, alto):
+    """Primer recuadro de localizar_recuadros_fecha(): (roi, método) o (None, motivo)."""
+    recuadros, motivo = localizar_recuadros_fecha(rows, ancho, alto)
+    return (recuadros[0][0], recuadros[0][1]) if recuadros else (None, motivo)
+
+
+# Zona del cargo de notificación en una REC vertical, como fracciones del ancho y del alto.
+# Es ancha a propósito: cubre páginas que ocupan toda la foto y páginas con margen gris debajo.
+ZONA_CARGO = (0.35, 0.52, 0.78, 0.84)
+
+
+def zona_cargo_por_posicion(ancho, alto):
+    """Recorte del cargo por posición relativa (sin rótulos), en píxeles."""
+    x1, y1, x2, y2 = ZONA_CARGO
+    return (int(ancho * x1), int(alto * y1), int(ancho * x2), int(alto * y2))
+
+
+def bandas_de_tinta(im, max_bandas=8, min_alto=8):
+    """Franjas horizontales con tinta azul dentro de un recorte: candidatas a líneas manuscritas.
+
+    Devuelve [(y1, y2), ...] en píxeles del recorte, de arriba abajo, unidas si están a menos
+    de media altura de línea, descartando franjas muy finas. Sin tinta azul devuelve [].
+    """
+    import numpy as np
+    tinta, fraccion = vista_tinta(im)
+    if tinta is None:
+        return []
+    mascara = np.asarray(tinta.convert('L')) < 128
+    filas = mascara.sum(axis=1)
+    umbral = max(2, int(0.004 * im.width))
+    bandas, inicio = [], None
+    for y, v in enumerate(filas):
+        if v >= umbral and inicio is None:
+            inicio = y
+        elif v < umbral and inicio is not None:
+            bandas.append([inicio, y]); inicio = None
+    if inicio is not None:
+        bandas.append([inicio, len(filas)])
+    unidas = []
+    for b in bandas:
+        if unidas and b[0] - unidas[-1][1] < max(4, (unidas[-1][1] - unidas[-1][0]) // 2):
+            unidas[-1][1] = b[1]
+        else:
+            unidas.append(b)
+    unidas = [b for b in unidas if b[1] - b[0] >= min_alto]
+    unidas.sort(key=lambda b: -(b[1] - b[0]))
+    return sorted((b[0], b[1]) for b in unidas[:max_bandas])
 
 
 def fecha_acta_negativa(rows):
@@ -612,7 +694,16 @@ def fecha_acta_negativa(rows):
 
 
 def clasificar_documento(head_text, foot_rows, ancho, alto, exp):
-    """REC completa, REC sin cargo (media página), cargo sin encabezado o anexo (AVISO PREVIO / CEDULÓN)."""
+    """Tipo de documento.
+
+    REC: encabezado de REC y recuadro de fecha localizado por rótulo.
+    REC_CARGO_NO_UBICADO: encabezado de REC en página vertical, pero el rótulo no se localizó
+        (casi siempre un fallo de lectura del rótulo: se intenta el recorte por posición).
+    REC_SIN_CARGO: encabezado de REC en foto horizontal sin recuadro: media página, el cargo
+        está en otra foto (se empareja).
+    CARGO_SIN_ENCABEZADO: recuadro sin encabezado (la otra media página).
+    ANEXO: AVISO PREVIO / CEDULÓN sin encabezado de REC. DESCONOCIDO: nada de lo anterior.
+    """
     cabecera = norm(head_text)
     es_rec = exp is not None or 'expedientecoactivo' in cabecera or 'ejecucioncoactiva' in cabecera
     anexo = ('avisoprevio' in cabecera or 'cedulon' in cabecera) and not es_rec
@@ -622,7 +713,7 @@ def clasificar_documento(head_text, foot_rows, ancho, alto, exp):
     if es_rec and roi:
         return 'REC'
     if es_rec:
-        return 'REC_SIN_CARGO'
+        return 'REC_SIN_CARGO' if ancho > alto else 'REC_CARGO_NO_UBICADO'
     if roi:
         return 'CARGO_SIN_ENCABEZADO'
     return 'DESCONOCIDO'
@@ -781,6 +872,14 @@ class PaddleWorker:
     def vivo(self):
         return self.proc is not None and self.proc.poll() is None
 
+    def cola_log(self, lineas=12):
+        """Últimas líneas del registro del proceso (para diagnosticar una caída)."""
+        try:
+            texto = self.log.read_text(encoding='utf-8', errors='replace').strip().splitlines()
+            return '\n'.join(l[:200] for l in texto[-lineas:] if l.strip())
+        except OSError:
+            return ''
+
     def close(self):
         if self.proc is not None:
             try:
@@ -859,7 +958,10 @@ class MotorOCR:
                 else:
                     print('PaddleOCR no puede inferir en este proceso (' + motivo + '); se usará EasyOCR.')
         if detector == 'paddle_aislado':
-            self.paddle_worker = PaddleWorker(paddle_python, self.paddle_kwargs)
+            # En el proceso aislado no hay conflicto con PyTorch: oneDNN (mkldnn) evita la ruta Im2Col del conv
+            # en CPU, que fue donde cayó Paddle en Colab, y el lado mayor del detector se limita a 960 px
+            # para que las imágenes grandes no agoten la memoria.
+            self.paddle_worker = PaddleWorker(paddle_python, self.paddle_kwargs_aislado())
             self.paddle_device = self.paddle_kwargs['device']
             self.detector_nombre = ('PaddleOCR PP-OCRv5' + (' mobile-det' if modo_rapido else '') + ' (' + self.paddle_device
                                     + ', proceso aislado Python ' + str(self.paddle_worker.info.get('python', '?')) + ')')
@@ -892,6 +994,11 @@ class MotorOCR:
                 pass
             print('AVISO: no se pudo cargar el lector VLM ' + model_name + '. Se continúa con TrOCR como único lector '
                   'manuscrito, así que la confianza ALTA no será alcanzable en esta pasada. Motivo: ' + self.vlm_error)
+
+    def paddle_kwargs_aislado(self):
+        kw = dict(self.paddle_kwargs)
+        kw.update(enable_mkldnn=True, text_det_limit_side_len=960, text_det_limit_type='max')
+        return kw
 
     def _activar_easyocr(self):
         import easyocr
@@ -928,11 +1035,20 @@ class MotorOCR:
                            'manuscrita con el formato DD/MM/AAAA. Si falta el día, el mes o el año, o no es legible, '
                            'responde exactamente ILEGIBLE. No inventes cifras.')
 
-    def read_vlm(self, im):
+    VLM_PROMPT_LOCALIZADOR = ('Esta imagen es la mitad inferior de un acta de notificación. Busca el rótulo impreso '
+                              '"FECHA DE NOTIFICACIÓN" y transcribe únicamente el valor manuscrito escrito junto a él o debajo, '
+                              'con el formato DD/MM/AAAA. Ignora "HORA DE NOTIFICACIÓN", "FOLIOS" y cualquier otra fecha. '
+                              'Si no hay valor, está incompleto o no es legible, responde exactamente ILEGIBLE. No inventes cifras.')
+
+    def read_vlm(self, im, prompt=None, max_pixels=None):
         import torch
-        messages = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': self.vlm_prompt}]}]
+        messages = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': prompt or self.vlm_prompt}]}]
         text = self.vlm_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.vlm_processor(text=[text], images=[im.convert('RGB')], return_tensors='pt').to(self.vlm_device)
+        extra = {'max_pixels': max_pixels} if max_pixels else {}
+        try:
+            inputs = self.vlm_processor(text=[text], images=[im.convert('RGB')], return_tensors='pt', **extra).to(self.vlm_device)
+        except TypeError:
+            inputs = self.vlm_processor(text=[text], images=[im.convert('RGB')], return_tensors='pt').to(self.vlm_device)
         with torch.inference_mode():
             out = self.vlm.generate(**inputs, max_new_tokens=16, do_sample=False)
         return self.vlm_processor.batch_decode(out[:, inputs['input_ids'].shape[1]:], skip_special_tokens=True)[0].strip()
@@ -944,16 +1060,12 @@ class MotorOCR:
             try:
                 return self.paddle_worker.read(im)
             except PaddleWorkerError as e:
+                # Una caída ya demuestra que Paddle no es fiable en este entorno: sin reintentos.
                 self.caidas_paddle += 1
-                if self.caidas_paddle <= 2:
-                    print(f'AVISO: el proceso de PaddleOCR se cayó ({e}). Se reinicia (intento {self.caidas_paddle}).')
-                    try:
-                        self.paddle_worker.start()
-                        return self.paddle_worker.read(im)
-                    except PaddleWorkerError as e2:
-                        self.caidas_paddle += 1
-                        e = e2
-                print('AVISO: PaddleOCR volvió a caer (' + str(e)[:160] + '). Se pasa a EasyOCR para el resto de la pasada.')
+                cola = self.paddle_worker.cola_log()
+                print('AVISO: el proceso de PaddleOCR se cayó (' + str(e)[:160] + '). Se pasa a EasyOCR para el resto de la pasada.')
+                if cola:
+                    print('Últimas líneas de ' + str(self.paddle_worker.log) + ':\n' + cola)
                 self.paddle_worker.close(); self.paddle_worker = None
                 self._activar_easyocr()
                 self.nombre = self.nombre.replace(self.nombre.split(' + ')[0], self.detector_nombre, 1)
@@ -1013,51 +1125,85 @@ class MotorOCR:
             data['observaciones'] = 'Documento anexo (AVISO PREVIO / CEDULÓN): no aporta fecha de notificación para F.'
             evidence['confianza'] = 'SIN_FECHA'; evidence['lectores_coinciden'] = []
             return data, evidence
-        roi_s, metodo = localizar_recuadro_fecha(foot_abs, w, h)
-        evidence['metodo_recuadro'] = metodo
-        if roi_s is None:
-            data['observaciones'] = metodo + (' Media página sin cargo: la fecha está en otra foto.' if tipo == 'REC_SIN_CARGO' else ' Completar manualmente desde la foto.')
-            evidence['confianza'] = 'SIN_FECHA'; evidence['lectores_coinciden'] = []
-            return data, evidence
-        roi = tuple(int(v * escala) for v in roi_s)
-        evidence['roi_fecha'] = [round(roi[0] / W, 6), round(roi[1] / H, 6), round(roi[2] / W, 6), round(roi[3] / H, 6)]
-        crop = original.crop(roi)
-        if crop.height < 120:
-            factor = max(2, int(120 / max(1, crop.height)) + 1)
-            crop = crop.resize((crop.width * factor, crop.height * factor), Image.Resampling.LANCZOS)
-        candidates = []
-        views = [('color', crop), ('contraste', ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB'))]
-        # Tinta azul aislada: elimina el rótulo impreso y las líneas de la tabla, que confunden a TrOCR.
-        tinta, fraccion = vista_tinta(crop)
-        evidence['tinta_azul'] = round(fraccion, 5)
-        if tinta is not None:
-            views.append(('tinta', tinta))
-        corregidas = {}
-        def registrar(vista, texto, detecciones=None):
+        recuadros, motivo = localizar_recuadros_fecha(foot_abs, w, h)
+        evidence['metodo_recuadro'] = motivo
+        evidence['recuadros'] = []
+        candidates, corregidas = [], {}
+        def registrar(vista, texto, detecciones=None, por_posicion=False):
             ex = extraer_fechas(texto)
             entrada = {'vista': vista, 'texto': texto, 'fechas': ex['exactas'], 'fechas_corregidas': ex['corregidas']}
+            if por_posicion:
+                entrada['por_posicion'] = True
             if detecciones is not None:
                 entrada['detecciones'] = detecciones
             evidence['variantes_fecha'].append(entrada)
             candidates.append(ex['exactas'])
             for cnd in ex['corregidas']:
                 corregidas.setdefault(cnd['fecha'], dict(cnd, vista=vista))
-        for label, view in views:
-            rows = self.read(view, digits=True)
-            text = ' '.join(r['text'] for r in sorted(rows, key=lambda r: min(x for x, y in r['box'])))
-            registrar(label, text, rows)
-        if self.trocr is not None:
-            for (label, _), handwritten in zip(views, self.read_handwritten_lote([v for _, v in views])):
-                registrar('trocr_' + label, handwritten)
-        if self.vlm is not None:
-            for label, view in [('vlm_color', crop)] + ([('vlm_tinta', tinta)] if tinta is not None else []):
+        def leer_recuadro(crop, prefijo='', por_posicion=False, con_detector=True):
+            """Lee un recorte con las vistas color/contraste/tinta en el detector, TrOCR y el VLM."""
+            if crop.height < 120:
+                factor = max(2, int(120 / max(1, crop.height)) + 1)
+                crop = crop.resize((crop.width * factor, crop.height * factor), Image.Resampling.LANCZOS)
+            views = [('color', crop), ('contraste', ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB'))]
+            tinta, fraccion = vista_tinta(crop)
+            evidence.setdefault('tinta_azul', round(fraccion, 5))
+            if tinta is not None:
+                views.append(('tinta', tinta))
+            if con_detector:
+                for label, view in views:
+                    rows = self.read(view, digits=True)
+                    text = ' '.join(r['text'] for r in sorted(rows, key=lambda r: min(x for x, y in r['box'])))
+                    registrar(prefijo + label, text, rows, por_posicion)
+            if self.trocr is not None:
+                for (label, _), handwritten in zip(views, self.read_handwritten_lote([v for _, v in views])):
+                    registrar(prefijo + 'trocr_' + label, handwritten, por_posicion=por_posicion)
+            if self.vlm is not None:
+                for label, view in [('vlm_color', crop)] + ([('vlm_tinta', tinta)] if tinta is not None else []):
+                    try:
+                        respuesta = self.read_vlm(view)
+                    except Exception as e:
+                        respuesta = 'ERROR: ' + str(e)[:120]
+                    registrar(prefijo + label, '' if 'ILEGIBLE' in respuesta.upper() else respuesta, por_posicion=por_posicion)
+                    if 'ILEGIBLE' in respuesta.upper():
+                        evidence['variantes_fecha'][-1]['texto'] = respuesta
+        for i, (roi_s, metodo) in enumerate(recuadros):
+            roi = tuple(int(v * escala) for v in roi_s)
+            fr = [round(roi[0] / W, 6), round(roi[1] / H, 6), round(roi[2] / W, 6), round(roi[3] / H, 6)]
+            evidence['recuadros'].append({'roi': fr, 'metodo': metodo})
+            if evidence['roi_fecha'] is None:
+                evidence['roi_fecha'] = fr
+            leer_recuadro(original.crop(roi), prefijo='' if i == 0 else f'r{i+1}_')
+        if not recuadros and tipo in ('REC', 'REC_CARGO_NO_UBICADO', 'DESCONOCIDO'):
+            # Respaldo por posición: franja del cargo en el formato REC. Sus lecturas nunca son ALTA solas.
+            zona = zona_cargo_por_posicion(W, H)
+            evidence['recuadro_por_posicion'] = [round(zona[0] / W, 6), round(zona[1] / H, 6), round(zona[2] / W, 6), round(zona[3] / H, 6)]
+            evidence['metodo_recuadro'] = motivo + ' Respaldo: recorte por posición.'
+            region = original.crop(zona)
+            bandas = bandas_de_tinta(region)
+            evidence['bandas_tinta'] = len(bandas)
+            margen = max(4, int(0.004 * H))
+            for j, (y1, y2) in enumerate(bandas):
+                banda = region.crop((0, max(0, y1 - margen), region.width, min(region.height, y2 + margen)))
+                leer_recuadro(banda, prefijo=f'pos{j+1}_', por_posicion=True)
+            if not evidence['recuadros']:
+                evidence['roi_fecha'] = evidence['recuadro_por_posicion']
+            sin_fecha = not {x for seq in candidates for x in seq}
+            if sin_fecha and self.vlm is not None:
+                # Qwen como localizador: lee solo el valor junto a FECHA DE NOTIFICACIÓN en la mitad inferior.
+                mitad = original.crop((0, int(H * 0.45), W, H))
                 try:
-                    respuesta = self.read_vlm(view)
+                    respuesta = self.read_vlm(mitad, prompt=self.VLM_PROMPT_LOCALIZADOR, max_pixels=1280 * 28 * 28)
                 except Exception as e:
                     respuesta = 'ERROR: ' + str(e)[:120]
-                registrar(label, '' if 'ILEGIBLE' in respuesta.upper() else respuesta)
+                registrar('vlm_mitad_inferior', '' if 'ILEGIBLE' in respuesta.upper() else respuesta, por_posicion=True)
                 if 'ILEGIBLE' in respuesta.upper():
                     evidence['variantes_fecha'][-1]['texto'] = respuesta
+        elif not recuadros:
+            data['observaciones'] = motivo + (' Media página sin cargo: la fecha está en otra foto.' if tipo == 'REC_SIN_CARGO' else ' Completar manualmente desde la foto.')
+            evidence['confianza'] = 'SIN_FECHA'; evidence['lectores_coinciden'] = []
+            evidence['fecha_acta'] = fecha_acta_negativa(foot_abs)
+            return data, evidence
         # Fecha del acta ('Siendo las __ horas, del día __/__/__'). Solo informa y genera alerta si
         # difiere de la propuesta: no entra en las candidatas ni en la confianza (ver alertas()).
         acta = fecha_acta_negativa(foot_abs)
@@ -1083,10 +1229,14 @@ class MotorOCR:
             evidence['propuesta_corregida'] = True
         else:
             data['observaciones'] = 'El OCR no obtuvo una fecha completa. Introducirla desde el recorte; no se adivina el año.'
+            if not recuadros:
+                data['observaciones'] = motivo + ' Tampoco se leyó una fecha en el recorte por posición. Completar manualmente desde la foto.'
             if len(corregidas) > 1:
                 data['observaciones'] += ' Candidatas corregidas distintas: ' + ', '.join(sorted(corregidas)) + '.'
         nivel, coinciden = nivel_confianza(evidence['variantes_fecha'], data['fecha_notificacion'])
         evidence['confianza'] = nivel; evidence['lectores_coinciden'] = coinciden
+        if data['fecha_notificacion'] and not recuadros:
+            data['observaciones'] += ' Leída en un recorte por posición (sin rótulo): comprueba que sea la casilla FECHA DE NOTIFICACIÓN.'
         return data, evidence
 
 class Proyecto:
@@ -1378,7 +1528,7 @@ class Proyecto:
             filas.append({'archivo': r['archivos'][0], 'categoria': self.categoria_carpeta(r['archivos'][0]), 'tipo': r.get('tipo') or '-',
                           'orientacion': ev.get('orientacion'), 'recuadro': ev.get('metodo_recuadro') or ('no' if ev.get('roi_fecha') is None else 'si'),
                           'campos': encontrados, 'confianza': r.get('confianza'),
-                          'completa': r.get('tipo') == 'REC' and all(encontrados[c] for c in ('expediente', 'nombre', 'codigo', 'fecha_emision')) and ev.get('roi_fecha') is not None})
+                          'completa': r.get('tipo') == 'REC' and all(encontrados[c] for c in ('expediente', 'nombre', 'codigo', 'fecha_emision')) and bool(ev.get('recuadros'))})
         n = len(filas)
         res = {'generado_en': ahora(), 'fotos_leidas': n,
                'por_tipo': dict(Counter(f['tipo'] for f in filas)),
