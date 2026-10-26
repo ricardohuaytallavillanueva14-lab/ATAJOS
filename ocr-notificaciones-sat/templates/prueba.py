@@ -8,6 +8,7 @@ PADDLE_GPU = False  # @param {type:"boolean"}
 MODO_RAPIDO = False  # @param {type:"boolean"}
 LECTOR_VLM = True  # @param {type:"boolean"}
 ORIENTACION_AUTO = False  # @param {type:"boolean"}
+VLM_DOS_VISTAS = True  # @param {type:"boolean"}
 # Procesa una muestra repartida entre carpetas para medir velocidad y calidad de lectura.
 # MOTOR auto: PaddleOCR en el entorno aislado (celda 1) si supera una prueba; si no, PaddleOCR en este proceso; si no, EasyOCR.
 #   Si el proceso de PaddleOCR se cae durante la pasada, se reinicia una vez y luego se pasa a EasyOCR sin perder avances.
@@ -20,6 +21,7 @@ ORIENTACION_AUTO = False  # @param {type:"boolean"}
 # MODO_RAPIDO usa el detector PP-OCRv5 mobile: más rápido en CPU, algo menos preciso.
 # LECTOR_VLM añade Qwen2.5-VL-3B como tercer lector independiente de la fecha (~7 GB en GPU T4).
 # ORIENTACION_AUTO corrige fotos giradas 90/180/270 grados (más lento).
+# VLM_DOS_VISTAS lee cada recuadro con Qwen en color y en contraste (dos lecturas); False = solo color, más rápido.
 if 'proyecto' not in globals():
     raise RuntimeError('Ejecuta antes las celdas 1 y 2.')
 if MUESTRA < 1:
@@ -28,7 +30,7 @@ if SONDEO_FORMATO:
     sondeo = proyecto.sondeo_formato()
 opciones = dict(motor=MOTOR, gpu=torch.cuda.is_available(), paddle_gpu=PADDLE_GPU, modo_rapido=MODO_RAPIDO,
                 vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO,
-                paddle_python=globals().get('PADDLE_PYTHON'))
+                paddle_python=globals().get('PADDLE_PYTHON'), vlm_vistas=2 if VLM_DOS_VISTAS else 1)
 if 'motor' not in globals() or any(getattr(motor, 'opciones', {}).get(k) != v for k, v in opciones.items() if k != 'gpu'):
     print('Cargando modelos. El primer uso los descarga (o los lee de la caché en Drive).')
     motor = MotorOCR(**opciones)

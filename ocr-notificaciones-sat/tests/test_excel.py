@@ -388,11 +388,11 @@ class LocalizacionTests(unittest.TestCase):
               caja(1000,2080,1500,2110,'FOLIOS ENTREGADOS:'),caja(100,1900,600,1930,'CARACTERISTICAS DEL LUGAR')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
         self.assertEqual(metodo,'rotulos_fecha_y_hora')
-        self.assertEqual((roi[1],roi[3]),(1930,1990)); self.assertLess(roi[0],1000); self.assertGreater(roi[2],1500)
+        self.assertEqual((roi[1],roi[3]),(1921,1996)); self.assertLess(roi[0],1000); self.assertGreater(roi[2],1500)
     def test_rotulo_partido_en_dos_detecciones(self):
         rows=[caja(1000,1900,1180,1930,'FECHA DE'),caja(1190,1901,1500,1931,'NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
-        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1931,1990))
+        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1921,1999))
     def test_solo_hora_o_nada(self):
         roi,metodo=c.localizar_recuadro_fecha([caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')],self.W,self.H)
         self.assertEqual(metodo,'rotulo_hora'); self.assertEqual(roi[3],1990); self.assertLess(roi[1],1990)
@@ -405,15 +405,33 @@ class LocalizacionTests(unittest.TestCase):
         # Inicio mal leído pero NOTIFICACION reconocible.
         rows=[caja(1000,1900,1500,1930,'PECHA DE NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
-        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1930,1990))
+        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertEqual((roi[1],roi[3]),(1921,1996))
+        # Un rótulo HORA pegado al de FECHA ya no deja un recorte de 30 px: altura mínima de 2,5 rótulos.
+        rows=[caja(1000,1900,1500,1930,'FECHA DE NOTIFICACION:'),caja(1000,1945,1500,1975,'HORA DE NOTIFICACION:')]
+        roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
+        self.assertEqual(metodo,'rotulos_fecha_y_hora'); self.assertGreaterEqual(roi[3]-roi[1],75)
         # Solo la palabra NOTIFICACION, con el rótulo HORA debajo: es el rótulo de FECHA.
         rows=[caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
-        self.assertEqual(metodo,'rotulo_notificacion_fecha'); self.assertEqual((roi[1],roi[3]),(1930,1990))
+        self.assertEqual(metodo,'rotulo_notificacion_fecha'); self.assertEqual((roi[1],roi[3]),(1921,1996))
         # Dos rótulos leídos solo como NOTIFICACION: el de arriba es FECHA y el de abajo HORA.
         rows=[caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'NOTIFICACION:')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
-        self.assertEqual(metodo,'rotulo_notificacion_fecha'); self.assertEqual((roi[1],roi[3]),(1930,1990))
+        self.assertEqual(metodo,'rotulo_notificacion_fecha'); self.assertEqual((roi[1],roi[3]),(1921,1996))
+        # 'NOTIFICACIÓN' dentro de un párrafo (línea larga) o bajo 'TÉNGASE POR BIEN NOTIFICADO' no es ancla.
+        parrafo=caja(100,2300,1500,2330,'Se adjunta a la presente copia de la O.P. y su cargo de notificacion y constancia de consentimiento')
+        self.assertEqual(c.localizar_recuadros_fecha([parrafo],self.W,self.H)[0],[])
+        bajo_cierre=[caja(100,2200,1500,2230,'TENGASE POR BIEN NOTIFICADO, SEGUN LO DISPUESTO'),caja(1000,2250,1200,2280,'NOTIFICACION:')]
+        self.assertEqual(c.localizar_recuadros_fecha(bajo_cierre,self.W,self.H)[0],[])
+        # Entre varias anclas ambiguas gana la que tiene HORA o FOLIOS debajo, aunque esté más arriba.
+        rows=[caja(1000,1700,1200,1730,'NOTIFICACION:'),caja(1000,1900,1200,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'HORA DE NOTIFICACION:'),
+              caja(1000,2100,1200,2130,'NOTIFICACION')]
+        roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
+        self.assertEqual(metodo,'rotulo_notificacion_fecha'); self.assertEqual(roi[1],1921)
+        # Sin apoyo debajo, gana la más baja de la página (la tabla está al final).
+        rows=[caja(1000,1700,1200,1730,'NOTIFICACION:'),caja(1000,2100,1200,2130,'NOTIFICACION')]
+        recs,_=c.localizar_recuadros_fecha(rows,self.W,self.H)
+        self.assertEqual(recs[0][0][1],2130)
         # NOTIFICACION suelto con FOLIOS debajo: es el rótulo de HORA, la casilla está encima.
         rows=[caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1000,1990,1500,2020,'FOLIOS ENTREGADOS:')]
         roi,metodo=c.localizar_recuadro_fecha(rows,self.W,self.H)
@@ -600,7 +618,7 @@ class PaddleWorkerTests(unittest.TestCase):
     def test_kwargs_del_aislado(self):
         m=c.MotorOCR.__new__(c.MotorOCR); m.paddle_kwargs=c.kwargs_paddle(); m.paddle_kwargs['device']='cpu'
         kw=m.paddle_kwargs_aislado()
-        self.assertTrue(kw['enable_mkldnn']); self.assertEqual((kw['text_det_limit_side_len'],kw['text_det_limit_type']),(960,'max'))
+        self.assertTrue(kw['enable_mkldnn']); self.assertEqual((kw['text_det_limit_side_len'],kw['text_det_limit_type']),(1600,'max'))
         self.assertFalse(m.paddle_kwargs['enable_mkldnn'])
 
 def _paddle_disponible():
@@ -637,7 +655,7 @@ class MotorSintetico:
     def __init__(self, filas_pie, con_vlm=False, fecha='15/09/2026', vlm_localizador=None):
         self.filas_pie=filas_pie; self.fecha=fecha; self.nombre='sintetico'
         self.paddle=None; self.paddle_worker=None; self.reader=None; self.trocr=object()
-        self.vlm=object() if con_vlm else None; self.vlm_localizador=vlm_localizador; self.llamadas_vlm=[]
+        self.vlm=object() if con_vlm else None; self.vlm_localizador=vlm_localizador; self.llamadas_vlm=[]; self.vlm_vistas=2
     def read(self, im, digits=False):
         if im.size==(1000,448): return []           # encabezado: parse_header no necesita filas, usamos el texto
         if im.size==(1000,700): return self.filas_pie
@@ -652,9 +670,10 @@ class MotorSintetico:
 
 class ImagenesSinteticasTests(unittest.TestCase):
     def guardar(self, im):
-        self.temp=tempfile.TemporaryDirectory(); ruta=Path(self.temp.name)/'pagina.png'; im.save(ruta); return ruta
+        if not hasattr(self,'temps'): self.temps=[]
+        d=tempfile.TemporaryDirectory(); self.temps.append(d); ruta=Path(d.name)/'pagina.png'; im.save(ruta); return ruta
     def tearDown(self):
-        if hasattr(self,'temp'): self.temp.cleanup()
+        for d in getattr(self,'temps',[]): d.cleanup()
     def encabezado(self):
         # parse_header() recibe el texto de las detecciones del encabezado; aquí lo simulamos con una fila.
         return [caja(60,60,900,100,'EXPEDIENTE COACTIVO : 16-012-000000001-2026-SAT-H/DCC-IPA')]
@@ -669,11 +688,21 @@ class ImagenesSinteticasTests(unittest.TestCase):
         # El pie se recorta desde el 50 % (y=700): el rótulo 'NOTIFICACION:' queda en y 258-290 del recorte.
         pie=[caja(480,258,760,290,'NOTIFICACION:')]
         d,ev=self.motor(pie).leer(ruta)
-        self.assertEqual(ev['tipo'],'REC'); self.assertEqual([r['metodo'] for r in ev['recuadros']],['rotulo_notificacion_ambos']*2)
+        self.assertEqual(ev['tipo'],'REC'); self.assertEqual([r['metodo'] for r in ev['recuadros']],['rotulo_notificacion_ambos'])
         self.assertEqual(d['fecha_notificacion'],'2026-09-15'); self.assertEqual(ev['confianza'],'MEDIA')
         self.assertNotIn('recuadro_por_posicion',ev)
         vistas={v['vista']:v['fechas'] for v in ev['variantes_fecha']}
-        self.assertEqual(vistas['trocr_color'],['2026-09-15']); self.assertEqual(vistas['r2_trocr_color'],[])   # la casilla de encima no tiene fecha
+        self.assertEqual(vistas['trocr_color'],['2026-09-15']); self.assertNotIn('r2_trocr_color',vistas)   # la segunda casilla no se lee si la primera dio fecha
+        # Si la primera casilla (debajo) no tiene la fecha, se lee la alternativa (encima).
+        ruta_arriba=self.guardar(pagina_sintetica(con_rotulo=False)); im=Image.open(ruta_arriba); dr=ImageDraw.Draw(im)
+        dr.rectangle((470,985,790,1080),fill='white'); dr.rectangle((480,900,760,935),fill='white'); im.save(ruta_arriba)
+        from PIL import ImageFont
+        try: fuente=ImageFont.load_default(size=34)
+        except TypeError: fuente=ImageFont.load_default()
+        dr.text((500,905),'15/09/2026',fill=(40,60,200),font=fuente); im.save(ruta_arriba)
+        pie_hora=[caja(480,300,760,332,'NOTIFICACION:')]   # el rótulo detectado es en realidad el de HORA (y=1000-1032 en página)
+        d,ev=self.motor(pie_hora).leer(ruta_arriba)
+        self.assertEqual([r['metodo'] for r in ev['recuadros']],['rotulo_notificacion_ambos']*2)
         # Con el VLM coincidiendo sobre el recuadro anclado por rótulo, ALTA sí es alcanzable.
         d,ev=self.motor(pie,con_vlm=True).leer(ruta)
         self.assertEqual((d['fecha_notificacion'],ev['confianza']),('2026-09-15','ALTA'))
@@ -686,6 +715,7 @@ class ImagenesSinteticasTests(unittest.TestCase):
         self.assertEqual(d['fecha_notificacion'],'2026-09-15'); self.assertIn('recorte por posición',d['observaciones'])
         vistas={v['vista']:v for v in ev['variantes_fecha']}
         self.assertTrue(vistas['pos1_trocr_color']['por_posicion']); self.assertEqual(vistas['pos1_vlm_color']['fechas'],['2026-09-15'])
+        self.assertIn('pos1_vlm_contraste',vistas); self.assertNotIn('pos1_vlm_tinta',vistas); self.assertNotIn('pos1_trocr_contraste',vistas)
         self.assertEqual(ev['confianza'],'MEDIA')                       # dos lectores manuscritos, pero por posición: nunca ALTA
         self.assertFalse(any(p for _,p in m.llamadas_vlm))             # con fecha leída no hace falta el localizador
         self.assertEqual(ev['roi_fecha'],ev['recuadro_por_posicion'])
@@ -713,6 +743,33 @@ class ImagenesSinteticasTests(unittest.TestCase):
         d,ev=m.leer(ruta2)
         self.assertEqual(ev['tipo'],'REC_SIN_CARGO'); self.assertNotIn('recuadro_por_posicion',ev); self.assertIsNone(d['fecha_notificacion'])
         self.assertIn('Media página',d['observaciones'])
+    def test_fechas_implausibles_no_se_proponen(self):
+        # Qwen 'lee' 06/09/2000 en color y 15/09/2026 en contraste: el año 2000 se descarta y no crea contradicción.
+        ruta=self.guardar(pagina_sintetica())
+        pie=[caja(480,258,760,290,'FECHA DE NOTIFICACION:'),caja(480,340,760,372,'HORA DE NOTIFICACION:')]
+        m=self.motor(pie,con_vlm=True)
+        respuestas=iter(['06/09/2000','15/09/2026'])
+        m.read_vlm=lambda im,prompt=None,max_pixels=None: next(respuestas,'ILEGIBLE')
+        d,ev=m.leer(ruta)
+        self.assertEqual(d['fecha_notificacion'],'2026-09-15'); self.assertNotEqual(ev['confianza'],'CONTRADICTORIA')
+        self.assertEqual(ev['fechas_implausibles'],[{'vista':'vlm_color','fechas':['2000-09-06']}])
+        # Una fecha anterior a la emisión (01/09/2026) tampoco se propone.
+        m=self.motor(pie,con_vlm=True); m.read_vlm=lambda im,prompt=None,max_pixels=None: '01/09/2026'
+        m.read_handwritten_lote=lambda imgs: ['nada' for _ in imgs]
+        d,ev=m.leer(ruta)
+        self.assertIsNone(d['fecha_notificacion']); self.assertTrue(any('2026-09-01' in x['fechas'] for x in ev['fechas_implausibles']))
+    def test_zoom_sobre_la_tabla_cuando_no_hay_rotulo(self):
+        ruta=self.guardar(pagina_sintetica())
+        m=self.motor([])
+        base=m.read
+        # El detector no ve nada en el pie, pero sí en la pasada con zoom (mitad derecha x2): rótulo en coordenadas del zoom.
+        def read(im,digits=False):
+            if im.size==(1200,1260): return [caja((480-400)*2,(958-770)*2,(760-400)*2,(990-770)*2,'FECHA DE NOTIFICACION:')]   # zoom desde (400,770)
+            return base(im,digits)
+        m.read=read
+        d,ev=m.leer(ruta)
+        self.assertTrue(ev['zoom_rotulos']); self.assertEqual(ev['tipo'],'REC'); self.assertEqual(ev['recuadros'][0]['metodo'],'rotulo_fecha')
+        self.assertEqual(d['fecha_notificacion'],'2026-09-15'); self.assertNotIn('recuadro_por_posicion',ev)
     def test_bandas_de_tinta(self):
         im=Image.new('RGB',(400,200),'white'); dr=ImageDraw.Draw(im)
         dr.rectangle((50,30,300,50),fill=(40,60,200)); dr.rectangle((50,120,200,150),fill=(40,60,200)); dr.line((0,100,400,100),fill='black',width=3)

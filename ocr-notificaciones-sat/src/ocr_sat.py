@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from collections import defaultdict, Counter
 from zoneinfo import ZoneInfo
 import base64, copy, csv, hashlib, html, io, json, os, re, time, unicodedata
@@ -578,17 +578,37 @@ def localizar_recuadros_fecha(rows, ancho, alto):
     def junto_a_otra_fecha(l):
         t = norm(l['text'])
         return 'emisi' in t or 'vencim' in t
-    fechas = sorted(((parecido_rotulo(l['text'], 'fecha', 'hora'), l) for l in lineas if not junto_a_otra_fecha(l)), key=lambda t: -t[0])
-    horas = sorted(((parecido_rotulo(l['text'], 'hora', 'fecha'), l) for l in lineas if not junto_a_otra_fecha(l)), key=lambda t: -t[0])
-    fecha = fechas[0][1] if fechas and fechas[0][0] > 0 else None
+    # Límite inferior de la tabla del cargo: todo lo que esté bajo 'TÉNGASE POR BIEN NOTIFICADO' es texto de cierre.
+    cierre = [l for l in lineas if parecido(l['text'], 'tengaseporbiennotificado', umbral=0.6, prefijo=4) or 'tengasepor' in norm(l['text'])]
+    tope = min(l['y1'] for l in cierre) if cierre else None
+    def es_rotulo_corto(l):
+        # Los rótulos de la tabla son líneas cortas; 'NOTIFICACIÓN' dentro de un párrafo no es ancla.
+        return len(l['text'].split()) <= 4 and len(norm(l['text'])) <= 30
+    def ancla_valida(score, l):
+        if score <= 0 or junto_a_otra_fecha(l):
+            return False
+        if tope is not None and l['y1'] >= tope:
+            return False
+        if score < 0.65 and (l['y1'] < 0.45 * alto or not es_rotulo_corto(l)):
+            return False
+        return True
+    def con_apoyo_debajo(l):
+        lh = max(10, l['y2'] - l['y1'])
+        for m in lineas:
+            if m is l or not (l['y2'] <= m['y1'] < l['y2'] + lh * 4) or abs(m['x1'] - l['x1']) > 0.25 * ancho:
+                continue
+            if parecido_rotulo(m['text'], 'hora', 'fecha') > 0 or parecido(m['text'], 'foliosentregados', umbral=0.6, prefijo=4):
+                return True
+        return False
+    fechas = [(sc, l) for sc, l in ((parecido_rotulo(l['text'], 'fecha', 'hora'), l) for l in lineas) if ancla_valida(sc, l)]
+    # Mejor puntuación primero; entre anclas ambiguas, antes las que tienen HORA o FOLIOS debajo y luego las más bajas en la página.
+    fechas.sort(key=lambda t: (-(t[0] if t[0] >= 0.65 else 0.5), 0 if con_apoyo_debajo(t[1]) else 1, -t[1]['y1']))
+    horas = sorted(((sc, l) for sc, l in ((parecido_rotulo(l['text'], 'hora', 'fecha'), l) for l in lineas) if ancla_valida(sc, l)), key=lambda t: -t[0])
+    fecha = fechas[0][1] if fechas else None
     fecha_ambigua = fecha is not None and fechas[0][0] < 0.65
-    if fecha_ambigua and fecha['y1'] < 0.45 * alto:
-        fecha = None; fecha_ambigua = False
     hora = None
     for score, l in horas:
-        if score <= 0:
-            break
-        if l is fecha or (score < 0.65 and l['y1'] < 0.45 * alto):
+        if l is fecha:
             continue
         if fecha is None or (l['y1'] > fecha['y2'] and abs(l['x1'] - fecha['x1']) < 0.25 * ancho):
             hora = l; break
@@ -607,15 +627,17 @@ def localizar_recuadros_fecha(rows, ancho, alto):
         return None
     resultados = []
     if fecha is not None and not fecha_ambigua:
-        lh = max(10, fecha['y2'] - fecha['y1']); top = fecha['y2']
+        lh = max(10, fecha['y2'] - fecha['y1']); top = fecha['y2'] - 0.3 * lh   # el manuscrito puede pisar el rótulo
         bottom = hora['y1'] if hora is not None and top < hora['y1'] < top + lh * 6 else min(alto, top + lh * 2.6)
+        # Un rótulo HORA detectado muy cerca deja un recorte que corta la fecha: altura mínima de 2,5 rótulos.
+        bottom = max(bottom, min(alto, top + lh * 2.5))
         roi = recorte(fecha['x1'], fecha['x2'], top, bottom)
         if roi: resultados.append((roi, 'rotulos_fecha_y_hora' if hora is not None else 'rotulo_fecha'))
     elif fecha is not None:
         lh = max(10, fecha['y2'] - fecha['y1'])
         folios = debajo(fecha, 'foliosentregados')
         if hora is not None and fecha['y2'] < hora['y1'] < fecha['y2'] + lh * 6:
-            roi = recorte(fecha['x1'], fecha['x2'], fecha['y2'], hora['y1'])
+            roi = recorte(fecha['x1'], fecha['x2'], fecha['y2'] - 0.3 * lh, max(hora['y1'], fecha['y2'] + lh * 2.2))
             if roi: resultados.append((roi, 'rotulo_notificacion_fecha'))
         elif folios is not None:
             roi = recorte(fecha['x1'], fecha['x2'], max(0, fecha['y1'] - lh * 2.6), fecha['y1'])
@@ -907,7 +929,7 @@ class MotorOCR:
     """Detector de texto impreso (PaddleOCR o EasyOCR) + TrOCR manuscrito + VLM opcional."""
     def __init__(self, motor='auto', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
                  paddle_gpu=False, modo_rapido=False, cpu_threads=None, vlm=None, orientacion_auto=False,
-                 paddle_python=None):
+                 paddle_python=None, vlm_vistas=2):
         """Carga los modelos una sola vez.
 
         motor: 'auto' elige el detector impreso en este orden: PaddleOCR en el intérprete
@@ -938,7 +960,9 @@ class MotorOCR:
         self.caidas_paddle = 0
         self.opciones = dict(motor=motor, gpu=gpu, trocr_model=trocr_model, paddle_gpu=paddle_gpu,
                              modo_rapido=modo_rapido, cpu_threads=cpu_threads, vlm=vlm or None,
-                             orientacion_auto=orientacion_auto, paddle_python=paddle_python or None)
+                             orientacion_auto=orientacion_auto, paddle_python=paddle_python or None,
+                             vlm_vistas=int(vlm_vistas))
+        self.vlm_vistas = int(vlm_vistas)
         self.gpu = bool(gpu and torch.cuda.is_available())
         self.paddle_kwargs = kwargs_paddle(modo_rapido, cpu_threads, orientacion_auto)
         self.paddle_kwargs['device'] = 'gpu' if paddle_gpu else 'cpu'
@@ -997,7 +1021,7 @@ class MotorOCR:
 
     def paddle_kwargs_aislado(self):
         kw = dict(self.paddle_kwargs)
-        kw.update(enable_mkldnn=True, text_det_limit_side_len=960, text_det_limit_type='max')
+        kw.update(enable_mkldnn=True, text_det_limit_side_len=1600, text_det_limit_type='max')
         return kw
 
     def _activar_easyocr(self):
@@ -1115,10 +1139,22 @@ class MotorOCR:
         offset = int(h * .50)
         foot = self.read(im.crop((0, offset, w, h)))
         foot_abs = [dict(r, box=[[x, y + offset] for x, y in r['box']]) for r in foot]
+        if not localizar_recuadros_fecha(foot_abs, w, h)[0]:
+            # Los rótulos de la tabla son pequeños: segunda pasada con zoom x2 sobre la mitad derecha del cargo.
+            zx, zy = int(w * 0.40), int(h * 0.55)
+            zoom = im.crop((zx, zy, w, h)); zoom = zoom.resize((zoom.width * 2, zoom.height * 2), Image.Resampling.LANCZOS)
+            extra = [dict(r, box=[[x / 2 + zx, y / 2 + zy] for x, y in r['box']]) for r in self.read(zoom)]
+            if extra:
+                foot_abs = foot_abs + extra
+                evidence_zoom = True
+            else:
+                evidence_zoom = False
+        else:
+            evidence_zoom = False
         tipo = clasificar_documento(head_text, foot_abs, w, h, exp)
         data = dict(expediente=exp, codigo=code, resolucion=res, nombre=nombre, fecha_notificacion=None,
                     fecha_emision=emision_doc, fecha_texto=None, observaciones='')
-        evidence = {'encabezado': head, 'pie': foot_abs, 'roi_fecha': None, 'variantes_fecha': [], 'tipo': tipo,
+        evidence = {'encabezado': head, 'pie': foot_abs, 'roi_fecha': None, 'variantes_fecha': [], 'tipo': tipo, 'zoom_rotulos': evidence_zoom,
                     'orientacion': 'horizontal' if W > H else 'vertical', 'tamano': [W, H],
                     'motor': self.nombre, 'aviso': 'Puntuaciones OCR no calibradas; no son probabilidades de acierto.'}
         if tipo == 'ANEXO':
@@ -1129,8 +1165,18 @@ class MotorOCR:
         evidence['metodo_recuadro'] = motivo
         evidence['recuadros'] = []
         candidates, corregidas = [], {}
+        emision_ref = fecha(emision_doc) or FECHA_EMISION
+        evidence['fechas_implausibles'] = []
         def registrar(vista, texto, detecciones=None, por_posicion=False):
             ex = extraer_fechas(texto)
+            # Una notificación no puede ser anterior a la emisión ni muy posterior: esas lecturas son errores
+            # de cifras (p. ej. 2005, 2000, 2021) y no se proponen; quedan registradas.
+            plausibles, implausibles = [], []
+            for f in ex['exactas']:
+                (plausibles if emision_ref <= fecha(f) <= emision_ref + timedelta(days=2 * VENTANA_DIAS) else implausibles).append(f)
+            if implausibles:
+                evidence['fechas_implausibles'].append({'vista': vista, 'fechas': implausibles})
+            ex['exactas'] = plausibles
             entrada = {'vista': vista, 'texto': texto, 'fechas': ex['exactas'], 'fechas_corregidas': ex['corregidas']}
             if por_posicion:
                 entrada['por_posicion'] = True
@@ -1145,21 +1191,23 @@ class MotorOCR:
             if crop.height < 120:
                 factor = max(2, int(120 / max(1, crop.height)) + 1)
                 crop = crop.resize((crop.width * factor, crop.height * factor), Image.Resampling.LANCZOS)
-            views = [('color', crop), ('contraste', ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB'))]
+            contraste = ImageOps.autocontrast(ImageOps.grayscale(crop)).convert('RGB')
             tinta, fraccion = vista_tinta(crop)
             evidence.setdefault('tinta_azul', round(fraccion, 5))
-            if tinta is not None:
-                views.append(('tinta', tinta))
+            # Detector impreso: una sola vista (la tinta aislada si existe), lee mal lo manuscrito y solo sirve de cruce.
             if con_detector:
-                for label, view in views:
-                    rows = self.read(view, digits=True)
-                    text = ' '.join(r['text'] for r in sorted(rows, key=lambda r: min(x for x, y in r['box'])))
-                    registrar(prefijo + label, text, rows, por_posicion)
+                label, view = ('tinta', tinta) if tinta is not None else ('color', crop)
+                rows = self.read(view, digits=True)
+                text = ' '.join(r['text'] for r in sorted(rows, key=lambda r: min(x for x, y in r['box'])))
+                registrar(prefijo + label, text, rows, por_posicion)
+            # TrOCR: tinta aislada (su mejor caso) y color.
             if self.trocr is not None:
+                views = ([('tinta', tinta)] if tinta is not None else []) + [('color', crop)]
                 for (label, _), handwritten in zip(views, self.read_handwritten_lote([v for _, v in views])):
                     registrar(prefijo + 'trocr_' + label, handwritten, por_posicion=por_posicion)
+            # VLM: color y, con vlm_vistas=2, contraste (la vista de tinta le resulta ilegible casi siempre).
             if self.vlm is not None:
-                for label, view in [('vlm_color', crop)] + ([('vlm_tinta', tinta)] if tinta is not None else []):
+                for label, view in [('vlm_color', crop)] + ([('vlm_contraste', contraste)] if self.vlm_vistas >= 2 else []):
                     try:
                         respuesta = self.read_vlm(view)
                     except Exception as e:
@@ -1168,6 +1216,8 @@ class MotorOCR:
                     if 'ILEGIBLE' in respuesta.upper():
                         evidence['variantes_fecha'][-1]['texto'] = respuesta
         for i, (roi_s, metodo) in enumerate(recuadros):
+            if i > 0 and any(candidates):
+                break   # el recuadro alternativo solo se lee si el primero no dio ninguna fecha
             roi = tuple(int(v * escala) for v in roi_s)
             fr = [round(roi[0] / W, 6), round(roi[1] / H, 6), round(roi[2] / W, 6), round(roi[3] / H, 6)]
             evidence['recuadros'].append({'roi': fr, 'metodo': metodo})
@@ -1646,6 +1696,10 @@ class Proyecto:
         res['alta_con_referencia']=tabla['ALTA']['total']
         res['concluyente']=tabla['ALTA']['total']>=minimo_alta
         res['tipos']=dict(Counter(self.records[k].get('tipo') or '-' for k in ids))
+        por_carpeta=defaultdict(Counter)
+        for x in res['detalle']:
+            por_carpeta[x['archivo'].split('/')[0]][x['resultado']]+=1
+        res['por_carpeta']={k:dict(v) for k,v in sorted(por_carpeta.items())}
         res['confianza_muestra']=dict(Counter(self.records[k].get('confianza') or (self.records[k]['estado'] if self.records[k]['estado'] in ('ERROR','ANEXO') else 'SIN_LECTURA') for k in ids))
         if n:
             print(f"Fotos con fecha de referencia en el Excel: {n} de {len(ids)}.")
@@ -1656,6 +1710,8 @@ class Proyecto:
                 print(f"{nivel:<15}{fila['total']:>6}  {celdas}")
             for x in res['detalle']:
                 if x['resultado']=='ERROR': print('  ERROR', x['archivo'], 'Excel', x['excel'], 'OCR', x['ocr'], 'confianza', x['confianza'])
+            if res['por_carpeta']:
+                print('  Por carpeta principal:', '; '.join(f"{k}: " + ', '.join(f'{e} {n}' for e, n in sorted(v.items())) for k, v in res['por_carpeta'].items()))
             if not res['concluyente']:
                 print(f"AVISO: solo {tabla['ALTA']['total']} casos ALTA con referencia (mínimo {minimo_alta}); el acierto de ALTA no es concluyente. Amplía la muestra.")
         else:

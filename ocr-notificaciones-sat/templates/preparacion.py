@@ -25,10 +25,23 @@ if os.name == 'nt':
     raise RuntimeError('Sigues conectado a tu PC. Selecciona un entorno alojado de Colab y vuelve a ejecutar.')
 
 drive.mount('/content/drive')
-raiz = Path(RUTA_FOTOS)
+def resolver_ruta(ruta):
+    """Drive distingue mayúsculas: si la ruta no existe tal cual, busca cada tramo sin distinguirlas."""
+    p = Path(ruta)
+    if p.exists():
+        return p
+    actual = Path(p.anchor or '/')
+    for tramo in p.parts[1:] if p.is_absolute() else p.parts:
+        candidatos = [h for h in actual.iterdir() if h.name.lower() == tramo.lower()] if actual.is_dir() else []
+        if len(candidatos) != 1:
+            return p
+        actual = candidatos[0]
+    print(f'Aviso: la ruta {ruta} no existe con esas mayúsculas; se usa {actual}')
+    return actual
+raiz = resolver_ruta(RUTA_FOTOS); RUTA_FOTOS = str(raiz)
 if not raiz.is_dir():
     raise FileNotFoundError('No aparece la carpeta. Autoriza la misma cuenta de Google que contiene las fotos. Ruta: ' + RUTA_FOTOS)
-salida = Path(RUTA_RESULTADOS)
+salida = resolver_ruta(RUTA_RESULTADOS); RUTA_RESULTADOS = str(salida)
 if salida == raiz or raiz in salida.parents:
     raise ValueError('RUTA_RESULTADOS debe estar fuera de la carpeta de fotografías.')
 
