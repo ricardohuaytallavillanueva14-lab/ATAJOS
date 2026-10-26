@@ -9,6 +9,7 @@ MODO_RAPIDO = False  # @param {type:"boolean"}
 LECTOR_VLM = True  # @param {type:"boolean"}
 ORIENTACION_AUTO = False  # @param {type:"boolean"}
 VLM_DOS_VISTAS = True  # @param {type:"boolean"}
+LECTOR_API = 'ninguno'  # @param ["ninguno", "deepseek"]
 # Procesa una muestra repartida entre carpetas para medir velocidad y calidad de lectura.
 # MOTOR auto: PaddleOCR en el entorno aislado (celda 1) si supera una prueba; si no, PaddleOCR en este proceso; si no, EasyOCR.
 #   Si el proceso de PaddleOCR se cae durante la pasada, se reinicia una vez y luego se pasa a EasyOCR sin perder avances.
@@ -22,16 +23,27 @@ VLM_DOS_VISTAS = True  # @param {type:"boolean"}
 # LECTOR_VLM añade Qwen2.5-VL-3B como tercer lector independiente de la fecha (~7 GB en GPU T4).
 # ORIENTACION_AUTO corrige fotos giradas 90/180/270 grados (más lento).
 # VLM_DOS_VISTAS lee cada recuadro con Qwen en color y en contraste (dos lecturas); False = solo color, más rápido.
+# LECTOR_API = deepseek añade un lector manuscrito externo (API de DeepSeek, modelo con visión). Solo envía el recorte de
+#   la fecha. Requiere el secreto DEEPSEEK_API_KEY en Colab (icono de llave, con acceso al cuaderno activado).
 if 'proyecto' not in globals():
     raise RuntimeError('Ejecuta antes las celdas 1 y 2.')
 if MUESTRA < 1:
     raise ValueError('MUESTRA debe ser al menos 1.')
 if SONDEO_FORMATO:
     sondeo = proyecto.sondeo_formato()
+clave_api = None
+if LECTOR_API != 'ninguno':
+    try:
+        from google.colab import userdata
+        clave_api = userdata.get({'deepseek': 'DEEPSEEK_API_KEY'}[LECTOR_API])
+    except Exception as e:
+        raise RuntimeError(f'No se pudo leer el secreto de la API ({e}). En Colab: panel izquierdo > icono de llave > añade DEEPSEEK_API_KEY y activa el acceso del cuaderno.')
 opciones = dict(motor=MOTOR, gpu=torch.cuda.is_available(), paddle_gpu=PADDLE_GPU, modo_rapido=MODO_RAPIDO,
                 vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO,
-                paddle_python=globals().get('PADDLE_PYTHON'), vlm_vistas=2 if VLM_DOS_VISTAS else 1)
+                paddle_python=globals().get('PADDLE_PYTHON'), vlm_vistas=2 if VLM_DOS_VISTAS else 1,
+                api=None if LECTOR_API == 'ninguno' else LECTOR_API)
 if 'motor' not in globals() or any(getattr(motor, 'opciones', {}).get(k) != v for k, v in opciones.items() if k != 'gpu'):
+    if clave_api: opciones['api_key'] = clave_api
     print('Cargando modelos. El primer uso los descarga (o los lee de la caché en Drive).')
     motor = MotorOCR(**opciones)
 print('Motor:', motor.nombre)
@@ -48,6 +60,8 @@ from collections import Counter
 print('Confianza en la muestra:', dict(Counter(proyecto.records[k].get('confianza') or 'ERROR' for k in ids_muestra)))
 print('Tipos de documento:', dict(Counter(proyecto.records[k].get('tipo') or '-' for k in ids_muestra)))
 print(aviso_lectores(motor))
+if getattr(motor, 'api', None) is not None:
+    print(f'API {motor.api.nombre}: {motor.api.llamadas} llamadas, {motor.api.errores} errores, {motor.api.tokens} tokens.')
 acierto = proyecto.medir_acierto(ids_muestra)
 estructura = proyecto.sondeo_estructura(ids_muestra)
 conciliacion = proyecto.conciliar()

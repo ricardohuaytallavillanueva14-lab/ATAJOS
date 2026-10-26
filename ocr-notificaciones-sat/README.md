@@ -101,6 +101,16 @@ Cadena de evidencia que queda en Drive:
 
 Límites que conviene declarar en cualquier uso formal: la garantía proviene del cotejo humano y de la trazabilidad, no del OCR. La celda 3 mide el acierto del OCR contra las filas que ya tienen F registrada en el Excel (patrón de referencia) sobre una muestra de 80 fotos antes de la pasada completa.
 
+## Lector externo por API (opcional)
+
+`LECTOR_API = deepseek` en las celdas 3 y 4 añade un lector manuscrito más: el modelo con visión de la API de DeepSeek (`deepseek-v4-flash-vision-exp`, formato compatible con OpenAI). Cuenta como lector manuscrito independiente, así que con Qwen y la API coincidiendo la confianza ALTA es alcanzable. Condiciones:
+
+- **Solo sale el recorte de la fecha**, sin nombre, expediente ni código. Aun así es un envío a un servicio externo (servidores de DeepSeek): la decisión corresponde a la institución, y conviene revisar la política de datos del proveedor.
+- La clave se guarda en los **secretos de Colab** (`DEEPSEEK_API_KEY`, con acceso del cuaderno activado), nunca en el repositorio ni en el cuaderno.
+- Costo orientativo: cada imagen cuesta como máximo unos 384 tokens de entrada; el lote completo con dos lecturas por foto ronda los 3,6 millones de tokens, es decir, menos de un dólar a los precios publicados en 2026. Verifica la tarifa vigente.
+- Un fallo de red o de la API se registra como `ERROR` en esa lectura y no detiene la pasada; se reintenta dos veces con espera. La celda 3 informa llamadas, errores y tokens consumidos.
+- Su utilidad sobre actas manuscritas no está medida: el piloto es quien lo dirá.
+
 ## Licencias de los modelos
 
 | Modelo | Licencia | Uso en este proyecto |

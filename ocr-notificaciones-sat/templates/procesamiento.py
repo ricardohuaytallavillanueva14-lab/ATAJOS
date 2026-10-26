@@ -7,16 +7,26 @@ MODO_RAPIDO = False  # @param {type:"boolean"}
 LECTOR_VLM = True  # @param {type:"boolean"}
 ORIENTACION_AUTO = False  # @param {type:"boolean"}
 VLM_DOS_VISTAS = True  # @param {type:"boolean"}
+LECTOR_API = 'ninguno'  # @param ["ninguno", "deepseek"]
 # LIMITE = 0 procesa todas las pendientes; un número procesa solo ese lote (útil para sesiones cortas).
 # Las copias idénticas se leen una sola vez. Cada lectura se guarda al instante: puedes reanudar.
 if 'proyecto' not in globals():
     raise RuntimeError('Ejecuta antes las celdas 1 y 2.')
 pendientes = proyecto.pendientes(REINTENTAR_ERRORES)
 if pendientes:
+    clave_api = None
+    if LECTOR_API != 'ninguno':
+        try:
+            from google.colab import userdata
+            clave_api = userdata.get({'deepseek': 'DEEPSEEK_API_KEY'}[LECTOR_API])
+        except Exception as e:
+            raise RuntimeError(f'No se pudo leer el secreto de la API ({e}). En Colab: panel izquierdo > icono de llave > añade DEEPSEEK_API_KEY y activa el acceso del cuaderno.')
     opciones = dict(motor=MOTOR, gpu=torch.cuda.is_available(), paddle_gpu=PADDLE_GPU, modo_rapido=MODO_RAPIDO,
-                vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO,
-                paddle_python=globals().get('PADDLE_PYTHON'), vlm_vistas=2 if VLM_DOS_VISTAS else 1)
+                    vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO,
+                    paddle_python=globals().get('PADDLE_PYTHON'), vlm_vistas=2 if VLM_DOS_VISTAS else 1,
+                    api=None if LECTOR_API == 'ninguno' else LECTOR_API)
     if 'motor' not in globals() or any(getattr(motor, 'opciones', {}).get(k) != v for k, v in opciones.items() if k != 'gpu'):
+        if clave_api: opciones['api_key'] = clave_api
         print('Cargando modelos. El primer uso los descarga (o los lee de la caché en Drive).')
         motor = MotorOCR(**opciones)
     print('Motor:', motor.nombre, '| pendientes:', len(pendientes))

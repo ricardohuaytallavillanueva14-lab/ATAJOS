@@ -655,7 +655,7 @@ class MotorSintetico:
     def __init__(self, filas_pie, con_vlm=False, fecha='15/09/2026', vlm_localizador=None):
         self.filas_pie=filas_pie; self.fecha=fecha; self.nombre='sintetico'
         self.paddle=None; self.paddle_worker=None; self.reader=None; self.trocr=object()
-        self.vlm=object() if con_vlm else None; self.vlm_localizador=vlm_localizador; self.llamadas_vlm=[]; self.vlm_vistas=2
+        self.vlm=object() if con_vlm else None; self.vlm_localizador=vlm_localizador; self.llamadas_vlm=[]; self.vlm_vistas=2; self.api=None
     def read(self, im, digits=False):
         if im.size==(1000,448): return []           # encabezado: parse_header no necesita filas, usamos el texto
         if im.size==(1000,700): return self.filas_pie
@@ -777,6 +777,64 @@ class ImagenesSinteticasTests(unittest.TestCase):
         self.assertEqual(c.bandas_de_tinta(Image.new('RGB',(50,50),'white')),[])
         self.assertEqual(c.zona_cargo_por_posicion(1000,1400),(350,728,780,1176))
 
+class LectorAPITests(unittest.TestCase):
+    def lector(self, respuestas):
+        l=c.LectorAPI('deepseek',api_key='clave-de-prueba',reintentos=1)
+        l.cuerpos=[]
+        def peticion(cuerpo):
+            l.cuerpos.append(cuerpo); r=respuestas.pop(0)
+            if isinstance(r,Exception): raise r
+            return {'choices':[{'message':{'content':r}}],'usage':{'total_tokens':420}}
+        l._peticion=peticion
+        return l
+    def test_peticion_y_respuesta(self):
+        l=self.lector(['15/09/2026'])
+        self.assertEqual(l.read(Image.new('RGB',(60,20),'white')),'15/09/2026')
+        cuerpo=l.cuerpos[0]
+        self.assertEqual(cuerpo['model'],'deepseek-v4-flash-vision-exp'); self.assertEqual(cuerpo['temperature'],0)
+        partes=cuerpo['messages'][0]['content']
+        self.assertEqual(partes[0]['type'],'text'); self.assertIn('ILEGIBLE',partes[0]['text'])
+        self.assertTrue(partes[1]['image_url']['url'].startswith('data:image/png;base64,'))
+        self.assertEqual((l.llamadas,l.errores,l.tokens),(1,0,420))
+    def test_reintento_y_error_no_detienen(self):
+        l=self.lector([ConnectionError('caída'),'16/09/2026'])
+        c.time.sleep=lambda s: None
+        self.assertEqual(l.read(Image.new('RGB',(60,20),'white')),'16/09/2026'); self.assertEqual(l.llamadas,2)
+        l=self.lector([ConnectionError('caída'),ConnectionError('caída otra vez')])
+        self.assertTrue(l.read(Image.new('RGB',(60,20),'white')).startswith('ERROR: ConnectionError')); self.assertEqual(l.errores,1)
+    def test_sin_clave_y_proveedor(self):
+        import os
+        os.environ.pop('DEEPSEEK_API_KEY',None)
+        with self.assertRaises(ValueError): c.LectorAPI('deepseek')
+        with self.assertRaises(ValueError): c.LectorAPI('otro',api_key='x')
+    def test_api_cuenta_como_lector_manuscrito(self):
+        v=lambda vista,fechas:{'vista':vista,'fechas':fechas,'texto':''}
+        F='2026-09-15'
+        self.assertEqual(c.nivel_confianza([v('vlm_color',[F]),v('api_color',[F])],F),('ALTA',['api','vlm']))
+        self.assertEqual(c.nivel_confianza([v('color',[F]),v('api_color',[F])],F),('MEDIA',['api','detector']))
+        self.assertEqual(c.nivel_confianza([v('api_color',[F]),v('trocr_color',['2026-09-16'])],None)[0],'CONTRADICTORIA')
+        class M: vlm=None; api=None
+        self.assertIn('no es alcanzable',c.aviso_lectores(M()))
+        M.api=type('A',(),{'nombre':'DeepSeek (API)'})(); self.assertIn('DeepSeek (API)',c.aviso_lectores(M())); self.assertIn('ALTA exige',c.aviso_lectores(M()))
+    def test_integracion_en_leer(self):
+        base=ImagenesSinteticasTests('test_bandas_de_tinta')
+        ruta=base.guardar(pagina_sintetica())
+        try:
+            pie=[caja(480,258,760,290,'FECHA DE NOTIFICACION:'),caja(480,340,760,372,'HORA DE NOTIFICACION:')]
+            m=base.motor(pie,con_vlm=True)
+            m.api=c.LectorAPI('deepseek',api_key='x'); m.api._peticion=lambda cuerpo: {'choices':[{'message':{'content':'15/09/2026'}}],'usage':{}}
+            d,ev=m.leer(ruta)
+            vistas={x['vista']:x['fechas'] for x in ev['variantes_fecha']}
+            self.assertEqual(vistas['api_color'],['2026-09-15']); self.assertIn('api_contraste',vistas)
+            self.assertEqual((d['fecha_notificacion'],ev['confianza']),('2026-09-15','ALTA')); self.assertIn('api',ev['lectores_coinciden'])
+            m.api._peticion=lambda cuerpo: (_ for _ in ()).throw(ConnectionError('sin red')); m.api.reintentos=0
+            d,ev=m.leer(ruta)
+            vistas={x['vista']:x for x in ev['variantes_fecha']}
+            self.assertEqual(vistas['api_color']['fechas'],[]); self.assertTrue(vistas['api_color']['texto'].startswith('ERROR'))
+            self.assertEqual(d['fecha_notificacion'],'2026-09-15')   # los demás lectores siguen
+        finally:
+            base.tearDown()
+
 class NotebookTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -807,6 +865,7 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('medir_acierto',''.join(cells[2]['source']))
         self.assertIn('MUESTRA = 200',''.join(cells[2]['source']))
         self.assertIn('REPROCESAR_MUESTRA',''.join(cells[2]['source']))
+        self.assertIn('LECTOR_API',''.join(cells[3]['source'])); self.assertIn('DEEPSEEK_API_KEY',''.join(cells[2]['source']))
     def test_notebook_matches_templates(self):
         nb=json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(nb,self.builder.render(),'Ejecuta python scripts/build_notebook.py y confirma el cuaderno.')

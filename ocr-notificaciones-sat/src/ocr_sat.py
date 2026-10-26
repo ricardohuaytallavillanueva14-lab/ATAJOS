@@ -76,7 +76,7 @@ def vista_tinta(im, min_fraccion=0.002):
 
 # Lectores entrenados en escritura manual. El detector impreso (PaddleOCR/EasyOCR) lee mal
 # los manuscritos, así que su coincidencia no basta para la confianza ALTA.
-LECTORES_MANUSCRITOS = ('trocr', 'vlm', 'deepseek')
+LECTORES_MANUSCRITOS = ('trocr', 'vlm', 'deepseek', 'api')
 
 
 def familia_lector(vista):
@@ -121,7 +121,8 @@ def nivel_confianza(variantes, propuesta):
 
 def aviso_lectores(motor):
     """Texto para pantalla sobre qué lectores manuscritos hay y si ALTA es alcanzable."""
-    manuscritos = ['TrOCR'] + (['Qwen2.5-VL'] if getattr(motor, 'vlm', None) is not None else [])
+    manuscritos = ['TrOCR'] + (['Qwen2.5-VL'] if getattr(motor, 'vlm', None) is not None else []) \
+        + ([getattr(motor, 'api', None).nombre] if getattr(motor, 'api', None) is not None else [])
     if len(manuscritos) < 2:
         error = getattr(motor, 'vlm_error', None)
         return ((f'El lector VLM no se cargó ({error}). ' if error else '') + 'Lectores manuscritos activos: ' + ', '.join(manuscritos) + '. Con un solo lector manuscrito la '
@@ -831,6 +832,63 @@ if __name__ == '__main__':
 '''
 
 
+PROVEEDORES_API = {
+    'deepseek': {'url': 'https://api.deepseek.com/chat/completions', 'modelo': 'deepseek-v4-flash-vision-exp',
+                 'variable': 'DEEPSEEK_API_KEY', 'nombre': 'DeepSeek V4 Flash Vision (API)'},
+}
+
+
+class LectorAPI:
+    """Lector manuscrito externo por API compatible con el formato de OpenAI (imagen en base64).
+
+    Solo recibe el recorte de la fecha (sin nombre ni expediente). Cada respuesta se registra;
+    un fallo de red o de la API devuelve 'ERROR: ...' y no detiene la pasada.
+    """
+    PROMPT = ('Esta imagen es el recuadro "FECHA DE NOTIFICACIÓN" de un acta. Transcribe únicamente la fecha '
+              'manuscrita con el formato DD/MM/AAAA. Si falta el día, el mes o el año, o no es legible, '
+              'responde exactamente ILEGIBLE. No inventes cifras. Responde solo con la fecha o con ILEGIBLE.')
+
+    def __init__(self, proveedor='deepseek', api_key=None, modelo=None, url=None, timeout=60, reintentos=2):
+        if proveedor not in PROVEEDORES_API:
+            raise ValueError('Proveedor desconocido: ' + str(proveedor) + '. Opciones: ' + ', '.join(PROVEEDORES_API))
+        cfg = PROVEEDORES_API[proveedor]
+        self.proveedor = proveedor
+        self.api_key = api_key or os.environ.get(cfg['variable'])
+        if not self.api_key:
+            raise ValueError(f"Falta la clave de {proveedor}: pásala en api_key o en la variable de entorno {cfg['variable']}.")
+        self.modelo = modelo or cfg['modelo']; self.url = url or cfg['url']
+        self.timeout = timeout; self.reintentos = reintentos
+        self.nombre = cfg['nombre']; self.llamadas = 0; self.errores = 0; self.tokens = 0
+
+    def _peticion(self, cuerpo):
+        import urllib.request
+        datos = json.dumps(cuerpo).encode('utf-8')
+        req = urllib.request.Request(self.url, data=datos, method='POST',
+                                     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self.api_key})
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+
+    def read(self, im, prompt=None):
+        b = io.BytesIO(); im.convert('RGB').save(b, 'PNG')
+        imagen = 'data:image/png;base64,' + base64.b64encode(b.getvalue()).decode('ascii')
+        cuerpo = {'model': self.modelo, 'temperature': 0, 'max_tokens': 20,
+                  'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': prompt or self.PROMPT},
+                                                            {'type': 'image_url', 'image_url': {'url': imagen}}]}]}
+        ultimo = None
+        for intento in range(self.reintentos + 1):
+            try:
+                self.llamadas += 1
+                resp = self._peticion(cuerpo)
+                self.tokens += int((resp.get('usage') or {}).get('total_tokens') or 0)
+                return (resp['choices'][0]['message']['content'] or '').strip()
+            except Exception as e:
+                ultimo = e
+                if intento < self.reintentos:
+                    time.sleep(2 ** intento)
+        self.errores += 1
+        return 'ERROR: ' + type(ultimo).__name__ + ': ' + str(ultimo)[:120]
+
+
 class PaddleWorkerError(RuntimeError):
     pass
 
@@ -929,7 +987,7 @@ class MotorOCR:
     """Detector de texto impreso (PaddleOCR o EasyOCR) + TrOCR manuscrito + VLM opcional."""
     def __init__(self, motor='auto', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
                  paddle_gpu=False, modo_rapido=False, cpu_threads=None, vlm=None, orientacion_auto=False,
-                 paddle_python=None, vlm_vistas=2):
+                 paddle_python=None, vlm_vistas=2, api=None, api_key=None):
         """Carga los modelos una sola vez.
 
         motor: 'auto' elige el detector impreso en este orden: PaddleOCR en el intérprete
@@ -963,6 +1021,8 @@ class MotorOCR:
                              orientacion_auto=orientacion_auto, paddle_python=paddle_python or None,
                              vlm_vistas=int(vlm_vistas))
         self.vlm_vistas = int(vlm_vistas)
+        self.api = LectorAPI(api, api_key=api_key) if api else None
+        self.opciones['api'] = api or None
         self.gpu = bool(gpu and torch.cuda.is_available())
         self.paddle_kwargs = kwargs_paddle(modo_rapido, cpu_threads, orientacion_auto)
         self.paddle_kwargs['device'] = 'gpu' if paddle_gpu else 'cpu'
@@ -1001,6 +1061,8 @@ class MotorOCR:
         self.vlm_error = None
         if vlm:
             self._activar_vlm(MODELOS_VLM[vlm])
+        if self.api is not None:
+            self.nombre += ' + ' + self.api.nombre
 
     def _activar_vlm(self, model_name):
         """Carga el VLM; si falla (memoria, pesos, versión), sigue sin él y lo dice con claridad."""
@@ -1214,6 +1276,13 @@ class MotorOCR:
                         respuesta = 'ERROR: ' + str(e)[:120]
                     registrar(prefijo + label, '' if 'ILEGIBLE' in respuesta.upper() else respuesta, por_posicion=por_posicion)
                     if 'ILEGIBLE' in respuesta.upper():
+                        evidence['variantes_fecha'][-1]['texto'] = respuesta
+            # Lector externo por API: solo el recorte, en color y (con dos vistas) en contraste.
+            if self.api is not None:
+                for label, view in [('api_color', crop)] + ([('api_contraste', contraste)] if self.vlm_vistas >= 2 else []):
+                    respuesta = self.api.read(view)
+                    registrar(prefijo + label, '' if ('ILEGIBLE' in respuesta.upper() or respuesta.startswith('ERROR')) else respuesta, por_posicion=por_posicion)
+                    if 'ILEGIBLE' in respuesta.upper() or respuesta.startswith('ERROR'):
                         evidence['variantes_fecha'][-1]['texto'] = respuesta
         for i, (roi_s, metodo) in enumerate(recuadros):
             if i > 0 and any(candidates):
