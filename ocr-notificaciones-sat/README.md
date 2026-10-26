@@ -103,10 +103,12 @@ Límites que conviene declarar en cualquier uso formal: la garantía proviene de
 
 ## Lector externo por API (opcional)
 
-`LECTOR_API = deepseek` en las celdas 3 y 4 añade un lector manuscrito más: el modelo con visión de la API de DeepSeek (`deepseek-v4-flash-vision-exp`, formato compatible con OpenAI). Cuenta como lector manuscrito independiente, así que con Qwen y la API coincidiendo la confianza ALTA es alcanzable. Condiciones:
+`LECTOR_API` en las celdas 3 y 4 añade un lector manuscrito más por API, en formato compatible con OpenAI: `gemini` (Google, `gemini-2.5-flash`, por su punto de compatibilidad con OpenAI) o `deepseek` (`deepseek-v4-flash-vision-exp`). Cuenta como lector manuscrito independiente, así que con Qwen y la API coincidiendo la confianza ALTA es alcanzable. Condiciones:
+
+- **Nivel gratuito de Gemini**: no requiere tarjeta, pero limita las peticiones por minuto y por día, y Google indica que puede usar lo enviado para mejorar sus productos. `API_PAUSA_S` (6 s) respeta el límite por minuto; si la cuota diaria se agota, el lector recibe HTTP 429 varias veces seguidas, se desactiva solo para el resto de la pasada y los demás lectores siguen. El resumen de la celda 3 indica llamadas, rechazos por cuota y si quedó desactivado. Con una sola vista por recuadro, un piloto de 200 fotos ronda las 200 a 250 llamadas.
 
 - **Solo sale el recorte de la fecha**, sin nombre, expediente ni código. Aun así es un envío a un servicio externo (servidores de DeepSeek): la decisión corresponde a la institución, y conviene revisar la política de datos del proveedor.
-- La clave se guarda en los **secretos de Colab** (`DEEPSEEK_API_KEY`, con acceso del cuaderno activado), nunca en el repositorio ni en el cuaderno.
+- La clave se guarda en los **secretos de Colab** (`GEMINI_API_KEY` o `DEEPSEEK_API_KEY`, con acceso del cuaderno activado), nunca en el repositorio, en el cuaderno ni en un chat.
 - Costo orientativo: cada imagen cuesta como máximo unos 384 tokens de entrada; el lote completo con dos lecturas por foto ronda los 3,6 millones de tokens, es decir, menos de un dólar a los precios publicados en 2026. Verifica la tarifa vigente.
 - Un fallo de red o de la API se registra como `ERROR` en esa lectura y no detiene la pasada; se reintenta dos veces con espera. La celda 3 informa llamadas, errores y tokens consumidos.
 - Su utilidad sobre actas manuscritas no está medida: el piloto es quien lo dirá.

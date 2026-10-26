@@ -655,7 +655,7 @@ class MotorSintetico:
     def __init__(self, filas_pie, con_vlm=False, fecha='15/09/2026', vlm_localizador=None):
         self.filas_pie=filas_pie; self.fecha=fecha; self.nombre='sintetico'
         self.paddle=None; self.paddle_worker=None; self.reader=None; self.trocr=object()
-        self.vlm=object() if con_vlm else None; self.vlm_localizador=vlm_localizador; self.llamadas_vlm=[]; self.vlm_vistas=2; self.api=None
+        self.vlm=object() if con_vlm else None; self.vlm_localizador=vlm_localizador; self.llamadas_vlm=[]; self.vlm_vistas=2; self.api=None; self.api_vistas=1
     def read(self, im, digits=False):
         if im.size==(1000,448): return []           # encabezado: parse_header no necesita filas, usamos el texto
         if im.size==(1000,700): return self.filas_pie
@@ -802,10 +802,32 @@ class LectorAPITests(unittest.TestCase):
         self.assertEqual(l.read(Image.new('RGB',(60,20),'white')),'16/09/2026'); self.assertEqual(l.llamadas,2)
         l=self.lector([ConnectionError('caída'),ConnectionError('caída otra vez')])
         self.assertTrue(l.read(Image.new('RGB',(60,20),'white')).startswith('ERROR: ConnectionError')); self.assertEqual(l.errores,1)
+    def test_gemini_y_cuota_gratuita(self):
+        import urllib.error
+        l=c.LectorAPI('gemini',api_key='clave',reintentos=1,max_cuota_seguidos=2,pausa=0)
+        self.assertEqual(l.modelo,'gemini-2.5-flash'); self.assertIn('generativelanguage.googleapis.com',l.url); self.assertIn('openai',l.url)
+        dormido=[]; c.time.sleep=lambda s: dormido.append(s)
+        def e429(): return urllib.error.HTTPError(l.url,429,'Too Many Requests',{'Retry-After':'3'},None)
+        resp=[e429(),{'choices':[{'message':{'content':'15/09/2026'}}],'usage':{}}]
+        l._peticion=lambda cuerpo: (_ for _ in ()).throw(resp.pop(0)) if isinstance(resp[0],Exception) else resp.pop(0)
+        self.assertEqual(l.read(Image.new('RGB',(60,20),'white')),'15/09/2026')     # un 429 espera y reintenta
+        self.assertEqual((l.rechazos_cuota,l.cuota_seguidos,l.agotado),(1,0,False)); self.assertGreaterEqual(max(dormido),15)
+        resp=[e429(),e429(),e429()]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r=l.read(Image.new('RGB',(60,20),'white'))
+        self.assertTrue(r.startswith('ERROR')); self.assertTrue(l.agotado); self.assertIn('Se desactiva',out.getvalue())
+        self.assertIn('cuota de la API agotada',l.read(Image.new('RGB',(60,20),'white')))   # sin más llamadas de red
+        self.assertEqual(l.llamadas,4)
+        # Pausa mínima entre llamadas.
+        l2=c.LectorAPI('gemini',api_key='clave',pausa=6); l2._peticion=lambda cuerpo: {'choices':[{'message':{'content':'x'}}],'usage':{}}
+        dormido.clear(); l2.read(Image.new('RGB',(60,20),'white')); l2.read(Image.new('RGB',(60,20),'white'))
+        self.assertTrue(any(5<=d<=6 for d in dormido))
     def test_sin_clave_y_proveedor(self):
         import os
         os.environ.pop('DEEPSEEK_API_KEY',None)
+        os.environ.pop('GEMINI_API_KEY',None)
         with self.assertRaises(ValueError): c.LectorAPI('deepseek')
+        with self.assertRaises(ValueError): c.LectorAPI('gemini')
         with self.assertRaises(ValueError): c.LectorAPI('otro',api_key='x')
     def test_api_cuenta_como_lector_manuscrito(self):
         v=lambda vista,fechas:{'vista':vista,'fechas':fechas,'texto':''}
@@ -822,7 +844,7 @@ class LectorAPITests(unittest.TestCase):
         try:
             pie=[caja(480,258,760,290,'FECHA DE NOTIFICACION:'),caja(480,340,760,372,'HORA DE NOTIFICACION:')]
             m=base.motor(pie,con_vlm=True)
-            m.api=c.LectorAPI('deepseek',api_key='x'); m.api._peticion=lambda cuerpo: {'choices':[{'message':{'content':'15/09/2026'}}],'usage':{}}
+            m.api_vistas=2; m.api=c.LectorAPI('deepseek',api_key='x'); m.api._peticion=lambda cuerpo: {'choices':[{'message':{'content':'15/09/2026'}}],'usage':{}}
             d,ev=m.leer(ruta)
             vistas={x['vista']:x['fechas'] for x in ev['variantes_fecha']}
             self.assertEqual(vistas['api_color'],['2026-09-15']); self.assertIn('api_contraste',vistas)
@@ -865,7 +887,7 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('medir_acierto',''.join(cells[2]['source']))
         self.assertIn('MUESTRA = 200',''.join(cells[2]['source']))
         self.assertIn('REPROCESAR_MUESTRA',''.join(cells[2]['source']))
-        self.assertIn('LECTOR_API',''.join(cells[3]['source'])); self.assertIn('DEEPSEEK_API_KEY',''.join(cells[2]['source']))
+        self.assertIn('LECTOR_API',''.join(cells[3]['source'])); self.assertIn('GEMINI_API_KEY',''.join(cells[2]['source'])); self.assertIn('API_PAUSA_S',''.join(cells[3]['source']))
     def test_notebook_matches_templates(self):
         nb=json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(nb,self.builder.render(),'Ejecuta python scripts/build_notebook.py y confirma el cuaderno.')

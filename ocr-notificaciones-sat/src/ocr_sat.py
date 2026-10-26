@@ -833,6 +833,8 @@ if __name__ == '__main__':
 
 
 PROVEEDORES_API = {
+    'gemini': {'url': 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', 'modelo': 'gemini-2.5-flash',
+               'variable': 'GEMINI_API_KEY', 'nombre': 'Gemini 2.5 Flash (API)'},
     'deepseek': {'url': 'https://api.deepseek.com/chat/completions', 'modelo': 'deepseek-v4-flash-vision-exp',
                  'variable': 'DEEPSEEK_API_KEY', 'nombre': 'DeepSeek V4 Flash Vision (API)'},
 }
@@ -848,7 +850,11 @@ class LectorAPI:
               'manuscrita con el formato DD/MM/AAAA. Si falta el día, el mes o el año, o no es legible, '
               'responde exactamente ILEGIBLE. No inventes cifras. Responde solo con la fecha o con ILEGIBLE.')
 
-    def __init__(self, proveedor='deepseek', api_key=None, modelo=None, url=None, timeout=60, reintentos=2):
+    def __init__(self, proveedor='gemini', api_key=None, modelo=None, url=None, timeout=60, reintentos=2,
+                 pausa=0.0, max_cuota_seguidos=5):
+        """pausa: segundos mínimos entre llamadas (el nivel gratuito de Gemini limita las peticiones por minuto).
+        max_cuota_seguidos: tras tantos rechazos de cuota seguidos (HTTP 429) el lector se desactiva para
+        el resto de la pasada en lugar de frenar cada foto; el resto de lectores siguen."""
         if proveedor not in PROVEEDORES_API:
             raise ValueError('Proveedor desconocido: ' + str(proveedor) + '. Opciones: ' + ', '.join(PROVEEDORES_API))
         cfg = PROVEEDORES_API[proveedor]
@@ -857,8 +863,10 @@ class LectorAPI:
         if not self.api_key:
             raise ValueError(f"Falta la clave de {proveedor}: pásala en api_key o en la variable de entorno {cfg['variable']}.")
         self.modelo = modelo or cfg['modelo']; self.url = url or cfg['url']
-        self.timeout = timeout; self.reintentos = reintentos
-        self.nombre = cfg['nombre']; self.llamadas = 0; self.errores = 0; self.tokens = 0
+        self.timeout = timeout; self.reintentos = reintentos; self.pausa = float(pausa)
+        self.max_cuota_seguidos = max_cuota_seguidos; self.cuota_seguidos = 0; self.agotado = False
+        self.nombre = cfg['nombre'] + (' ' + self.modelo if modelo else ''); self.llamadas = 0; self.errores = 0; self.tokens = 0
+        self.rechazos_cuota = 0; self._ultima = 0.0
 
     def _peticion(self, cuerpo):
         import urllib.request
@@ -874,15 +882,36 @@ class LectorAPI:
         cuerpo = {'model': self.modelo, 'temperature': 0, 'max_tokens': 20,
                   'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': prompt or self.PROMPT},
                                                             {'type': 'image_url', 'image_url': {'url': imagen}}]}]}
+        if self.agotado:
+            return 'ERROR: cuota de la API agotada; lector desactivado en esta pasada.'
         ultimo = None
         for intento in range(self.reintentos + 1):
             try:
-                self.llamadas += 1
+                espera = self.pausa - (time.monotonic() - self._ultima)
+                if espera > 0:
+                    time.sleep(espera)
+                self.llamadas += 1; self._ultima = time.monotonic()
                 resp = self._peticion(cuerpo)
                 self.tokens += int((resp.get('usage') or {}).get('total_tokens') or 0)
+                self.cuota_seguidos = 0
                 return (resp['choices'][0]['message']['content'] or '').strip()
             except Exception as e:
                 ultimo = e
+                codigo = getattr(e, 'code', None)
+                if codigo == 429:
+                    # Límite de peticiones por minuto o cuota diaria del nivel gratuito.
+                    self.rechazos_cuota += 1; self.cuota_seguidos += 1
+                    if self.cuota_seguidos >= self.max_cuota_seguidos:
+                        self.agotado = True
+                        print('AVISO: la API ' + self.nombre + ' rechazó ' + str(self.cuota_seguidos) + ' peticiones seguidas por cuota (HTTP 429). '
+                              'Se desactiva este lector para el resto de la pasada; los demás lectores siguen.')
+                        break
+                    try:
+                        retraso = float(getattr(e, 'headers', {}).get('Retry-After') or 0) if getattr(e, 'headers', None) else 0
+                    except (TypeError, ValueError):
+                        retraso = 0
+                    time.sleep(max(retraso, 15 * (intento + 1)))
+                    continue
                 if intento < self.reintentos:
                     time.sleep(2 ** intento)
         self.errores += 1
@@ -987,7 +1016,7 @@ class MotorOCR:
     """Detector de texto impreso (PaddleOCR o EasyOCR) + TrOCR manuscrito + VLM opcional."""
     def __init__(self, motor='auto', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
                  paddle_gpu=False, modo_rapido=False, cpu_threads=None, vlm=None, orientacion_auto=False,
-                 paddle_python=None, vlm_vistas=2, api=None, api_key=None):
+                 paddle_python=None, vlm_vistas=2, api=None, api_key=None, api_vistas=1, api_pausa=0.0):
         """Carga los modelos una sola vez.
 
         motor: 'auto' elige el detector impreso en este orden: PaddleOCR en el intérprete
@@ -1021,8 +1050,9 @@ class MotorOCR:
                              orientacion_auto=orientacion_auto, paddle_python=paddle_python or None,
                              vlm_vistas=int(vlm_vistas))
         self.vlm_vistas = int(vlm_vistas)
-        self.api = LectorAPI(api, api_key=api_key) if api else None
-        self.opciones['api'] = api or None
+        self.api = LectorAPI(api, api_key=api_key, pausa=api_pausa) if api else None
+        self.api_vistas = int(api_vistas)
+        self.opciones.update(api=api or None, api_vistas=int(api_vistas), api_pausa=float(api_pausa))
         self.gpu = bool(gpu and torch.cuda.is_available())
         self.paddle_kwargs = kwargs_paddle(modo_rapido, cpu_threads, orientacion_auto)
         self.paddle_kwargs['device'] = 'gpu' if paddle_gpu else 'cpu'
@@ -1279,7 +1309,7 @@ class MotorOCR:
                         evidence['variantes_fecha'][-1]['texto'] = respuesta
             # Lector externo por API: solo el recorte, en color y (con dos vistas) en contraste.
             if self.api is not None:
-                for label, view in [('api_color', crop)] + ([('api_contraste', contraste)] if self.vlm_vistas >= 2 else []):
+                for label, view in [('api_color', crop)] + ([('api_contraste', contraste)] if self.api_vistas >= 2 else []):
                     respuesta = self.api.read(view)
                     registrar(prefijo + label, '' if ('ILEGIBLE' in respuesta.upper() or respuesta.startswith('ERROR')) else respuesta, por_posicion=por_posicion)
                     if 'ILEGIBLE' in respuesta.upper() or respuesta.startswith('ERROR'):
