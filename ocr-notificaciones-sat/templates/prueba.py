@@ -2,6 +2,7 @@
 MUESTRA = 200  # @param {type:"integer"}
 SEMILLA = 2026  # @param {type:"integer"}
 SONDEO_FORMATO = True  # @param {type:"boolean"}
+REPROCESAR_MUESTRA = True  # @param {type:"boolean"}
 MOTOR = 'auto'  # @param ["auto", "paddle_aislado", "paddle", "easyocr"]
 PADDLE_GPU = False  # @param {type:"boolean"}
 MODO_RAPIDO = False  # @param {type:"boolean"}
@@ -12,6 +13,8 @@ ORIENTACION_AUTO = False  # @param {type:"boolean"}
 #   Si el proceso de PaddleOCR se cae durante la pasada, se reinicia una vez y luego se pasa a EasyOCR sin perder avances.
 # PADDLE_GPU requiere paddlepaddle-gpu; si no está disponible, vuelve a CPU automáticamente.
 # Con unas 200 fotos, parte corresponderá a filas que ya tienen F: sirven de patrón para medir el acierto real.
+# REPROCESAR_MUESTRA vuelve a leer las fotos de la muestra aunque ya tengan lectura (las aprobadas no se tocan), para
+#   comparar pilotos sobre las mismas fotos; la lectura anterior queda en historial_ocr.
 # SONDEO_FORMATO recorre todas las fotos sin OCR (orientación, tamaño, carpeta) y guarda sondeo_formato_*.json.
 # El acierto de ALTA solo es concluyente con al menos 30 casos ALTA con referencia; el resumen se guarda en piloto_*.json.
 # MODO_RAPIDO usa el detector PP-OCRv5 mobile: más rápido en CPU, algo menos preciso.
@@ -32,7 +35,7 @@ if 'motor' not in globals() or any(getattr(motor, 'opciones', {}).get(k) != v fo
 print('Motor:', motor.nombre)
 muestra = seleccionar_muestra(proyecto.listar_fotos(), proyecto.fotos, cantidad=MUESTRA, semilla=SEMILLA)
 ids_muestra = proyecto.ids_de(muestra)
-resumen = proyecto.procesar(motor, limite=len(ids_muestra), solo=ids_muestra)
+resumen = proyecto.procesar(motor, limite=len(ids_muestra), solo=ids_muestra, reprocesar=REPROCESAR_MUESTRA)
 print('Resultado de la muestra:', resumen)
 for k in ids_muestra:
     r = proyecto.records[k]

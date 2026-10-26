@@ -161,6 +161,12 @@ class ProyectoTests(ProyectoBase):
             resumen=p.procesar(motor,limite=10)
         self.assertEqual(resumen['procesadas'],1); self.assertEqual(p.pendientes(),[])
         self.assertIn('segundos',p.records[ids[0]]['evidencia_ocr'])
+        # reprocesar: vuelve a leer las ya leídas conservando la lectura anterior; las aprobadas no.
+        p.aprobar(ids[0],dict(expediente='16-012-1-2026',codigo='123',resolucion='UNO',nombre='PERSONA FICTICIA',fecha_notificacion='15/09/2026',fecha_emision='02/09/2026'),'Ana')
+        with contextlib.redirect_stdout(io.StringIO()):
+            resumen=p.procesar(motor,limite=10,solo=ids,reprocesar=True)
+        self.assertEqual(resumen['procesadas'],1); self.assertEqual(p.records[ids[0]]['estado'],'APROBADO')
+        self.assertEqual(len(p.records[ids[1]]['historial_ocr']),1); self.assertEqual(p.records[ids[1]]['estado'],'POR_REVISAR')
         with self.assertRaises(ValueError):
             p.ids_de([self.fotos/'no_existe.png'])
 
@@ -743,6 +749,7 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('paddle_python',''.join(cells[3]['source']))
         self.assertIn('medir_acierto',''.join(cells[2]['source']))
         self.assertIn('MUESTRA = 200',''.join(cells[2]['source']))
+        self.assertIn('REPROCESAR_MUESTRA',''.join(cells[2]['source']))
     def test_notebook_matches_templates(self):
         nb=json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(nb,self.builder.render(),'Ejecuta python scripts/build_notebook.py y confirma el cuaderno.')

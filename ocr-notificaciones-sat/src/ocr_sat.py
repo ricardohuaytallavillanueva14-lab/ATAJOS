@@ -1360,17 +1360,19 @@ class Proyecto:
         print('Estados:',dict(counts))
         return counts
 
-    def procesar(self,motor,limite=100,reintentar_errores=False,reprocesar_pendientes=False,solo=None):
+    def procesar(self,motor,limite=100,reintentar_errores=False,reprocesar_pendientes=False,solo=None,reprocesar=False):
         """Lee las fotos pendientes y guarda cada propuesta al instante.
 
         solo: colección de identificadores a los que se limita la pasada (p. ej. una
-        muestra). Cada foto se lee de Drive una sola vez: la huella se calcula sobre
+        muestra). reprocesar: vuelve a leer también las fotos ya leídas (POR_REVISAR,
+        PENDIENTE, ERROR) conservando la lectura anterior en historial_ocr; las aprobadas
+        no se tocan. Cada foto se lee de Drive una sola vez: la huella se calcula sobre
         los mismos bytes que recibe el OCR. Devuelve un resumen con tiempos.
         """
         if not hasattr(self,'active'):
             raise ValueError('Ejecuta primero el inventario.')
         if limite < 1: raise ValueError('El límite debe ser mayor que cero.')
-        eligible={'NUEVO'} | ({'ERROR'} if reintentar_errores else set())
+        eligible={'NUEVO'} | ({'ERROR'} if reintentar_errores else set()) | ({'POR_REVISAR','PENDIENTE','ERROR'} if reprocesar else set())
         universo=sorted(self.active) if solo is None else [k for k in solo if k in self.active]
         pending=[self.records[k] for k in universo
                  if self.records[k]['estado'] in eligible or
