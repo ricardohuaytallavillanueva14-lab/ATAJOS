@@ -9,6 +9,7 @@ ORIENTACION_AUTO = False  # @param {type:"boolean"}
 VLM_DOS_VISTAS = True  # @param {type:"boolean"}
 LECTOR_API = 'ninguno'  # @param ["ninguno", "gemini", "deepseek"]
 API_PAUSA_S = 6  # @param {type:"integer"}
+API_MODELO = 'gemini-3.8-flash'  # @param {type:"string"}
 # LIMITE = 0 procesa todas las pendientes; un número procesa solo ese lote (útil para sesiones cortas).
 # Las copias idénticas se leen una sola vez. Cada lectura se guarda al instante: puedes reanudar.
 if 'proyecto' not in globals():
@@ -25,7 +26,8 @@ if pendientes:
     opciones = dict(motor=MOTOR, gpu=torch.cuda.is_available(), paddle_gpu=PADDLE_GPU, modo_rapido=MODO_RAPIDO,
                     vlm='qwen' if LECTOR_VLM else None, orientacion_auto=ORIENTACION_AUTO,
                     paddle_python=globals().get('PADDLE_PYTHON'), vlm_vistas=2 if VLM_DOS_VISTAS else 1,
-                    api=None if LECTOR_API == 'ninguno' else LECTOR_API, api_vistas=1, api_pausa=API_PAUSA_S)
+                    api=None if LECTOR_API == 'ninguno' else LECTOR_API, api_vistas=1, api_pausa=API_PAUSA_S,
+                api_modelo=API_MODELO.strip() or None)
     if 'motor' not in globals() or any(getattr(motor, 'opciones', {}).get(k) != v for k, v in opciones.items() if k != 'gpu'):
         if clave_api: opciones['api_key'] = clave_api
         print('Cargando modelos. El primer uso los descarga (o los lee de la caché en Drive).')

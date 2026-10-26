@@ -833,8 +833,8 @@ if __name__ == '__main__':
 
 
 PROVEEDORES_API = {
-    'gemini': {'url': 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', 'modelo': 'gemini-2.5-flash',
-               'variable': 'GEMINI_API_KEY', 'nombre': 'Gemini 2.5 Flash (API)'},
+    'gemini': {'url': 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', 'modelo': 'gemini-3.8-flash',
+               'variable': 'GEMINI_API_KEY', 'nombre': 'Gemini (API)'},
     'deepseek': {'url': 'https://api.deepseek.com/chat/completions', 'modelo': 'deepseek-v4-flash-vision-exp',
                  'variable': 'DEEPSEEK_API_KEY', 'nombre': 'DeepSeek V4 Flash Vision (API)'},
 }
@@ -865,16 +865,28 @@ class LectorAPI:
         self.modelo = modelo or cfg['modelo']; self.url = url or cfg['url']
         self.timeout = timeout; self.reintentos = reintentos; self.pausa = float(pausa)
         self.max_cuota_seguidos = max_cuota_seguidos; self.cuota_seguidos = 0; self.agotado = False
-        self.nombre = cfg['nombre'] + (' ' + self.modelo if modelo else ''); self.llamadas = 0; self.errores = 0; self.tokens = 0
-        self.rechazos_cuota = 0; self._ultima = 0.0
+        self.motivo_desactivado = None
+        self.nombre = cfg['nombre'] + ' ' + self.modelo; self.llamadas = 0; self.errores = 0; self.tokens = 0
+        self.rechazos_cuota = 0; self.temporales = 0; self._ultima = 0.0
+
+    def desactivar(self, motivo):
+        self.agotado = True; self.motivo_desactivado = motivo
+        print('AVISO: ' + motivo + ' Se desactiva el lector ' + self.nombre + ' para el resto de la pasada; los demás lectores siguen.')
 
     def _peticion(self, cuerpo):
         import urllib.request
         datos = json.dumps(cuerpo).encode('utf-8')
         req = urllib.request.Request(self.url, data=datos, method='POST',
                                      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self.api_key})
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode('utf-8'))
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            try:
+                e.detalle = e.read().decode('utf-8', errors='replace')[:300]
+            except Exception:
+                e.detalle = ''
+            raise
 
     def read(self, im, prompt=None):
         b = io.BytesIO(); im.convert('RGB').save(b, 'PNG')
@@ -883,9 +895,11 @@ class LectorAPI:
                   'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': prompt or self.PROMPT},
                                                             {'type': 'image_url', 'image_url': {'url': imagen}}]}]}
         if self.agotado:
-            return 'ERROR: cuota de la API agotada; lector desactivado en esta pasada.'
+            return 'ERROR: lector desactivado: ' + (self.motivo_desactivado or 'cuota de la API agotada.')
         ultimo = None
-        for intento in range(self.reintentos + 1):
+        intentos_503 = 3   # 503 (alta demanda) y tiempos de espera: reintentos con espera exponencial, aparte de los errores
+        intento = 0; intentos_temporales = 0
+        while intento <= self.reintentos:
             try:
                 espera = self.pausa - (time.monotonic() - self._ultima)
                 if espera > 0:
@@ -898,22 +912,32 @@ class LectorAPI:
             except Exception as e:
                 ultimo = e
                 codigo = getattr(e, 'code', None)
+                temporal = codigo in (500, 502, 503, 504) or isinstance(e, TimeoutError) or 'timed out' in str(e).lower() \
+                    or (hasattr(e, 'reason') and isinstance(getattr(e, 'reason', None), TimeoutError))
+                if codigo == 404 or (codigo == 400 and 'model' in str(getattr(e, 'detalle', '')).lower()):
+                    self.desactivar(f'Modelo "{self.modelo}" no disponible para esta clave (HTTP {codigo}). Cambia API_MODELO.')
+                    break
                 if codigo == 429:
                     # Límite de peticiones por minuto o cuota diaria del nivel gratuito.
                     self.rechazos_cuota += 1; self.cuota_seguidos += 1
                     if self.cuota_seguidos >= self.max_cuota_seguidos:
-                        self.agotado = True
-                        print('AVISO: la API ' + self.nombre + ' rechazó ' + str(self.cuota_seguidos) + ' peticiones seguidas por cuota (HTTP 429). '
-                              'Se desactiva este lector para el resto de la pasada; los demás lectores siguen.')
+                        self.desactivar(f'La API rechazó {self.cuota_seguidos} peticiones seguidas por cuota (HTTP 429).')
                         break
                     try:
                         retraso = float(getattr(e, 'headers', {}).get('Retry-After') or 0) if getattr(e, 'headers', None) else 0
                     except (TypeError, ValueError):
                         retraso = 0
                     time.sleep(max(retraso, 15 * (intento + 1)))
+                    intento += 1
                     continue
-                if intento < self.reintentos:
-                    time.sleep(2 ** intento)
+                if temporal and intentos_temporales < intentos_503:
+                    # Alta demanda o tiempo agotado: se cuenta aparte, se espera 5, 10, 20 s y no se desactiva.
+                    self.temporales += 1; intentos_temporales += 1
+                    time.sleep(5 * (2 ** (intentos_temporales - 1)))
+                    continue
+                intento += 1
+                if intento <= self.reintentos:
+                    time.sleep(2 ** (intento - 1))
         self.errores += 1
         return 'ERROR: ' + type(ultimo).__name__ + ': ' + str(ultimo)[:120]
 
@@ -1016,7 +1040,7 @@ class MotorOCR:
     """Detector de texto impreso (PaddleOCR o EasyOCR) + TrOCR manuscrito + VLM opcional."""
     def __init__(self, motor='auto', gpu=False, trocr_model='microsoft/trocr-base-handwritten',
                  paddle_gpu=False, modo_rapido=False, cpu_threads=None, vlm=None, orientacion_auto=False,
-                 paddle_python=None, vlm_vistas=2, api=None, api_key=None, api_vistas=1, api_pausa=0.0):
+                 paddle_python=None, vlm_vistas=2, api=None, api_key=None, api_vistas=1, api_pausa=0.0, api_modelo=None):
         """Carga los modelos una sola vez.
 
         motor: 'auto' elige el detector impreso en este orden: PaddleOCR en el intérprete
@@ -1050,9 +1074,9 @@ class MotorOCR:
                              orientacion_auto=orientacion_auto, paddle_python=paddle_python or None,
                              vlm_vistas=int(vlm_vistas))
         self.vlm_vistas = int(vlm_vistas)
-        self.api = LectorAPI(api, api_key=api_key, pausa=api_pausa) if api else None
+        self.api = LectorAPI(api, api_key=api_key, pausa=api_pausa, modelo=api_modelo or None) if api else None
         self.api_vistas = int(api_vistas)
-        self.opciones.update(api=api or None, api_vistas=int(api_vistas), api_pausa=float(api_pausa))
+        self.opciones.update(api=api or None, api_vistas=int(api_vistas), api_pausa=float(api_pausa), api_modelo=api_modelo or None)
         self.gpu = bool(gpu and torch.cuda.is_available())
         self.paddle_kwargs = kwargs_paddle(modo_rapido, cpu_threads, orientacion_auto)
         self.paddle_kwargs['device'] = 'gpu' if paddle_gpu else 'cpu'

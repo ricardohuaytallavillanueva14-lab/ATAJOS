@@ -805,7 +805,8 @@ class LectorAPITests(unittest.TestCase):
     def test_gemini_y_cuota_gratuita(self):
         import urllib.error
         l=c.LectorAPI('gemini',api_key='clave',reintentos=1,max_cuota_seguidos=2,pausa=0)
-        self.assertEqual(l.modelo,'gemini-2.5-flash'); self.assertIn('generativelanguage.googleapis.com',l.url); self.assertIn('openai',l.url)
+        self.assertEqual(l.modelo,'gemini-3.8-flash'); self.assertIn('generativelanguage.googleapis.com',l.url); self.assertIn('openai',l.url)
+        self.assertEqual(c.LectorAPI('gemini',api_key='clave',modelo='gemini-4-flash').modelo,'gemini-4-flash')
         dormido=[]; c.time.sleep=lambda s: dormido.append(s)
         def e429(): return urllib.error.HTTPError(l.url,429,'Too Many Requests',{'Retry-After':'3'},None)
         resp=[e429(),{'choices':[{'message':{'content':'15/09/2026'}}],'usage':{}}]
@@ -816,12 +817,35 @@ class LectorAPITests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             r=l.read(Image.new('RGB',(60,20),'white'))
         self.assertTrue(r.startswith('ERROR')); self.assertTrue(l.agotado); self.assertIn('Se desactiva',out.getvalue())
-        self.assertIn('cuota de la API agotada',l.read(Image.new('RGB',(60,20),'white')))   # sin más llamadas de red
+        self.assertIn('por cuota',l.read(Image.new('RGB',(60,20),'white')))   # sin más llamadas de red
         self.assertEqual(l.llamadas,4)
         # Pausa mínima entre llamadas.
         l2=c.LectorAPI('gemini',api_key='clave',pausa=6); l2._peticion=lambda cuerpo: {'choices':[{'message':{'content':'x'}}],'usage':{}}
         dormido.clear(); l2.read(Image.new('RGB',(60,20),'white')); l2.read(Image.new('RGB',(60,20),'white'))
         self.assertTrue(any(5<=d<=6 for d in dormido))
+    def test_503_timeout_y_404(self):
+        import urllib.error, socket
+        dormido=[]; c.time.sleep=lambda s: dormido.append(s)
+        def http(code,detalle=''):
+            e=urllib.error.HTTPError('u',code,'err',{},None); e.detalle=detalle; return e
+        # 503 dos veces y luego éxito: reintentos con espera exponencial, contados aparte, sin error ni desactivación.
+        l=c.LectorAPI('gemini',api_key='k',reintentos=1); resp=[http(503),http(503),{'choices':[{'message':{'content':'15/09/2026'}}],'usage':{}}]
+        l._peticion=lambda cuerpo: (_ for _ in ()).throw(resp.pop(0)) if isinstance(resp[0],Exception) else resp.pop(0)
+        self.assertEqual(l.read(Image.new('RGB',(60,20),'white')),'15/09/2026')
+        self.assertEqual((l.temporales,l.errores,l.agotado),(2,0,False)); self.assertEqual(dormido[:2],[5,10])
+        # Tiempo de espera agotado se trata igual que 503.
+        resp=[TimeoutError('timed out'),socket.timeout('timed out'),{'choices':[{'message':{'content':'16/09/2026'}}],'usage':{}}]
+        self.assertEqual(l.read(Image.new('RGB',(60,20),'white')),'16/09/2026'); self.assertEqual(l.temporales,4); self.assertFalse(l.agotado)
+        # Cuatro 503 seguidos agotan los 3 reintentos temporales: cuenta un error, pero el lector sigue activo.
+        resp=[http(503)]*6
+        self.assertTrue(l.read(Image.new('RGB',(60,20),'white')).startswith('ERROR')); self.assertEqual(l.errores,1); self.assertFalse(l.agotado)
+        # 404 de modelo: mensaje claro y desactivación sin excepción.
+        l=c.LectorAPI('gemini',api_key='k'); resp=[http(404,'This model models/gemini-2.5-flash is no longer available to new users')]
+        l._peticion=lambda cuerpo: (_ for _ in ()).throw(resp.pop(0))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r=l.read(Image.new('RGB',(60,20),'white'))
+        self.assertTrue(l.agotado); self.assertIn('no disponible para esta clave',l.motivo_desactivado); self.assertIn('API_MODELO',out.getvalue())
+        self.assertTrue(r.startswith('ERROR')); self.assertIn('no disponible',l.read(Image.new('RGB',(60,20),'white'))); self.assertEqual(l.llamadas,1)
     def test_sin_clave_y_proveedor(self):
         import os
         os.environ.pop('DEEPSEEK_API_KEY',None)
@@ -887,7 +911,7 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('medir_acierto',''.join(cells[2]['source']))
         self.assertIn('MUESTRA = 200',''.join(cells[2]['source']))
         self.assertIn('REPROCESAR_MUESTRA',''.join(cells[2]['source']))
-        self.assertIn('LECTOR_API',''.join(cells[3]['source'])); self.assertIn('GEMINI_API_KEY',''.join(cells[2]['source'])); self.assertIn('API_PAUSA_S',''.join(cells[3]['source']))
+        self.assertIn('LECTOR_API',''.join(cells[3]['source'])); self.assertIn('GEMINI_API_KEY',''.join(cells[2]['source'])); self.assertIn('API_PAUSA_S',''.join(cells[3]['source'])); self.assertIn("API_MODELO = 'gemini-3.8-flash'",''.join(cells[2]['source'])); self.assertIn('API_MODELO',''.join(cells[3]['source']))
     def test_notebook_matches_templates(self):
         nb=json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(nb,self.builder.render(),'Ejecuta python scripts/build_notebook.py y confirma el cuaderno.')

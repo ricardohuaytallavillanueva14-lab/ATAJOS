@@ -103,7 +103,7 @@ Límites que conviene declarar en cualquier uso formal: la garantía proviene de
 
 ## Lector externo por API (opcional)
 
-`LECTOR_API` en las celdas 3 y 4 añade un lector manuscrito más por API, en formato compatible con OpenAI: `gemini` (Google, `gemini-2.5-flash`, por su punto de compatibilidad con OpenAI) o `deepseek` (`deepseek-v4-flash-vision-exp`). Cuenta como lector manuscrito independiente, así que con Qwen y la API coincidiendo la confianza ALTA es alcanzable. Condiciones:
+`LECTOR_API` en las celdas 3 y 4 añade un lector manuscrito más por API, en formato compatible con OpenAI: `gemini` (Google, por su punto de compatibilidad con OpenAI; modelo en `API_MODELO`, por defecto `gemini-3.8-flash`, porque Google retiró `gemini-2.5-flash` para claves nuevas) o `deepseek` (`deepseek-v4-flash-vision-exp`). Ante HTTP 503 o tiempo de espera agotado reintenta hasta tres veces con esperas de 5, 10 y 20 s y lo cuenta aparte; ante HTTP 404 de modelo avisa «modelo no disponible para esta clave» y desactiva solo ese lector. Cuenta como lector manuscrito independiente, así que con Qwen y la API coincidiendo la confianza ALTA es alcanzable. Condiciones:
 
 - **Nivel gratuito de Gemini**: no requiere tarjeta, pero limita las peticiones por minuto y por día, y Google indica que puede usar lo enviado para mejorar sus productos. `API_PAUSA_S` (6 s) respeta el límite por minuto; si la cuota diaria se agota, el lector recibe HTTP 429 varias veces seguidas, se desactiva solo para el resto de la pasada y los demás lectores siguen. El resumen de la celda 3 indica llamadas, rechazos por cuota y si quedó desactivado. Con una sola vista por recuadro, un piloto de 200 fotos ronda las 200 a 250 llamadas.
 
