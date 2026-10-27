@@ -8,7 +8,7 @@ LECTOR_VLM = True  # @param {type:"boolean"}
 ORIENTACION_AUTO = False  # @param {type:"boolean"}
 VLM_DOS_VISTAS = True  # @param {type:"boolean"}
 LECTOR_API = 'ninguno'  # @param ["ninguno", "gemini", "deepseek"]
-API_PAUSA_S = 6  # @param {type:"integer"}
+API_PAUSA_S = 15  # @param {type:"integer"}
 API_MODELO = 'gemini-3.8-flash'  # @param {type:"string"}
 # LIMITE = 0 procesa todas las pendientes; un número procesa solo ese lote (útil para sesiones cortas).
 # Las copias idénticas se leen una sola vez. Cada lectura se guarda al instante: puedes reanudar.

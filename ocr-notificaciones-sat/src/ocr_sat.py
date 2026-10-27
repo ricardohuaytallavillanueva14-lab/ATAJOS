@@ -80,19 +80,41 @@ LECTORES_MANUSCRITOS = ('trocr', 'vlm', 'deepseek', 'api')
 
 
 def familia_lector(vista):
-    """Agrupa las vistas por lector independiente: detector (impreso), trocr, vlm, deepseek, acta."""
+    """Agrupa las vistas por lector independiente: detector (impreso), trocr, vlm, deepseek, api, acta.
+
+    Ignora el prefijo del recuadro ('r2_' recuadro alternativo, 'pos3_' línea del recorte por posición):
+    'pos1_trocr_color' es TrOCR, no el detector.
+    """
+    base = re.sub(r'^(?:r\d+_|pos\d+_)', '', str(vista))
     for prefijo in LECTORES_MANUSCRITOS + ('acta',):
-        if str(vista).startswith(prefijo):
+        if base.startswith(prefijo):
             return prefijo
     return 'detector'
+
+
+def consenso_manuscrito(variantes):
+    """Fecha en la que coinciden al menos dos lectores manuscritos distintos, sin que ningún
+    lector manuscrito lea otra. None si no hay ese consenso. Las lecturas por posición cuentan."""
+    por_familia = defaultdict(set)
+    for v in variantes:
+        familia = familia_lector(v.get('vista'))
+        if familia in LECTORES_MANUSCRITOS:
+            por_familia[familia].update(v.get('fechas') or [])
+    fechas = {d for ds in por_familia.values() for d in ds}
+    if len(fechas) != 1:
+        return None
+    unica = next(iter(fechas))
+    return unica if sum(1 for ds in por_familia.values() if ds == {unica}) >= 2 else None
 
 
 def nivel_confianza(variantes, propuesta):
     """Clasifica la propuesta de fecha según qué lectores independientes coinciden.
 
-    ALTA: al menos dos lectores manuscritos distintos (TrOCR, VLM) leyeron exactamente la
-        misma fecha y ningún lector leyó otra. El detector impreso no cuenta para ALTA:
-        detector + un manuscrito = MEDIA. Sin el lector VLM, ALTA no es alcanzable.
+    ALTA: al menos dos lectores manuscritos distintos (TrOCR, VLM, API) leyeron exactamente la
+        misma fecha y ningún lector manuscrito leyó otra. El detector impreso no cuenta para
+        ALTA (detector + un manuscrito = MEDIA) y tampoco puede contradecir a dos manuscritos
+        que coinciden: en el piloto 3 leyó el '1' de '18' como '/' y anuló aciertos.
+        Sin un segundo lector manuscrito, ALTA no es alcanzable.
     MEDIA: hay propuesta, nadie la contradice, pero no llegan a dos lectores manuscritos.
     CONTRADICTORIA: hay lecturas de fechas distintas. SIN_FECHA: nadie leyó una fecha.
     Las lecturas marcadas como corregidas no cuentan para ningún nivel.
@@ -108,6 +130,9 @@ def nivel_confianza(variantes, propuesta):
         por_familia[familia].update(v.get('fechas') or [])
         if not v.get('por_posicion'):
             firmes[familia].update(v.get('fechas') or [])
+    consenso = consenso_manuscrito(variantes)
+    if consenso is not None and propuesta == consenso and por_familia.get('detector', set()) - {consenso}:
+        por_familia.pop('detector', None); firmes.pop('detector', None)   # el detector discrepa: no cuenta
     distintas = {d for ds in por_familia.values() for d in ds}
     if len(distintas) > 1:
         return 'CONTRADICTORIA', sorted(f for f, ds in por_familia.items() if ds == {propuesta})
@@ -585,13 +610,25 @@ def localizar_recuadros_fecha(rows, ancho, alto):
     def es_rotulo_corto(l):
         # Los rótulos de la tabla son líneas cortas; 'NOTIFICACIÓN' dentro de un párrafo no es ancla.
         return len(l['text'].split()) <= 4 and len(norm(l['text'])) <= 30
+    def otro_rotulo(l):
+        # 'ACTA DE NOTIFICACIÓN (bajo la puerta)', 'PERSONAL QUE NOTIFICA', 'AVISO PREVIO', '...cargo de notificación':
+        # contienen la palabra pero no son la casilla de la fecha.
+        t = norm(l['text'])
+        return any(p in t for p in ('acta', 'personal', 'puerta', 'aviso', 'cargo', 'constancia'))
+    def en_columna_central(l):
+        centro = (l['x1'] + l['x2']) / 2
+        return 0.36 * ancho <= centro <= 0.74 * ancho
     def ancla_valida(score, l):
         if score <= 0 or junto_a_otra_fecha(l):
             return False
         if tope is not None and l['y1'] >= tope:
             return False
-        if score < 0.65 and (l['y1'] < 0.45 * alto or not es_rotulo_corto(l)):
-            return False
+        if score < 0.65:
+            if l['y1'] < 0.45 * alto or not es_rotulo_corto(l) or otro_rotulo(l):
+                return False
+            # Un 'NOTIFICACIÓN' suelto solo es ancla en la columna central del cargo o con HORA/FOLIOS debajo.
+            if not (en_columna_central(l) or con_apoyo_debajo(l)):
+                return False
         return True
     def con_apoyo_debajo(l):
         lh = max(10, l['y2'] - l['y1'])
@@ -602,8 +639,10 @@ def localizar_recuadros_fecha(rows, ancho, alto):
                 return True
         return False
     fechas = [(sc, l) for sc, l in ((parecido_rotulo(l['text'], 'fecha', 'hora'), l) for l in lineas) if ancla_valida(sc, l)]
-    # Mejor puntuación primero; entre anclas ambiguas, antes las que tienen HORA o FOLIOS debajo y luego las más bajas en la página.
-    fechas.sort(key=lambda t: (-(t[0] if t[0] >= 0.65 else 0.5), 0 if con_apoyo_debajo(t[1]) else 1, -t[1]['y1']))
+    # Mejor puntuación primero; entre anclas ambiguas, antes las que tienen HORA o FOLIOS debajo, luego las de la
+    # columna central y, por último, las más bajas en la página.
+    fechas.sort(key=lambda t: (-(t[0] if t[0] >= 0.65 else 0.5), 0 if con_apoyo_debajo(t[1]) else 1,
+                               0 if en_columna_central(t[1]) else 1, -t[1]['y1']))
     horas = sorted(((sc, l) for sc, l in ((parecido_rotulo(l['text'], 'hora', 'fecha'), l) for l in lineas) if ancla_valida(sc, l)), key=lambda t: -t[0])
     fecha = fechas[0][1] if fechas else None
     fecha_ambigua = fecha is not None and fechas[0][0] < 0.65
@@ -921,7 +960,11 @@ class LectorAPI:
                     # Límite de peticiones por minuto o cuota diaria del nivel gratuito.
                     self.rechazos_cuota += 1; self.cuota_seguidos += 1
                     if self.cuota_seguidos >= self.max_cuota_seguidos:
-                        self.desactivar(f'La API rechazó {self.cuota_seguidos} peticiones seguidas por cuota (HTTP 429).')
+                        detalle = str(getattr(e, 'detalle', '') or '')
+                        pista = ' La respuesta indica límite 0: el nivel gratuito no incluye este modelo; prueba otro en API_MODELO.' \
+                            if re.search(r'limit["\s:]*0\b', detalle) else ''
+                        self.desactivar(f'La API rechazó {self.cuota_seguidos} peticiones seguidas por cuota (HTTP 429).' + pista
+                                        + (f' Respuesta: {detalle[:200]}' if detalle else ''))
                         break
                     try:
                         retraso = float(getattr(e, 'headers', {}).get('Retry-After') or 0) if getattr(e, 'headers', None) else 0
@@ -1292,6 +1335,10 @@ class MotorOCR:
                 (plausibles if emision_ref <= fecha(f) <= emision_ref + timedelta(days=2 * VENTANA_DIAS) else implausibles).append(f)
             if implausibles:
                 evidence['fechas_implausibles'].append({'vista': vista, 'fechas': implausibles})
+            # El detector impreso a veces lee el '1' manuscrito como '/' o '|': '/8 09 26' daría 08/09 en vez de 18/09.
+            if familia_lector(vista) == 'detector' and plausibles and re.search(r'(?:^|\s)[/|\\]\s?\d', str(texto or '')):
+                evidence.setdefault('lecturas_descartadas', []).append({'vista': vista, 'fechas': plausibles, 'motivo': 'dígito inicial perdido'})
+                plausibles = []
             ex['exactas'] = plausibles
             entrada = {'vista': vista, 'texto': texto, 'fechas': ex['exactas'], 'fechas_corregidas': ex['corregidas']}
             if por_posicion:
@@ -1347,19 +1394,28 @@ class MotorOCR:
             if evidence['roi_fecha'] is None:
                 evidence['roi_fecha'] = fr
             leer_recuadro(original.crop(roi), prefijo='' if i == 0 else f'r{i+1}_')
-        if not recuadros and tipo in ('REC', 'REC_CARGO_NO_UBICADO', 'DESCONOCIDO'):
-            # Respaldo por posición: franja del cargo en el formato REC. Sus lecturas nunca son ALTA solas.
+        def fecha_manuscrita():
+            return any(v.get('fechas') for v in evidence['variantes_fecha'] if familia_lector(v.get('vista')) in LECTORES_MANUSCRITOS)
+        sin_fecha_en_recuadro = bool(recuadros) and not fecha_manuscrita()
+        if (not recuadros or sin_fecha_en_recuadro) and tipo in ('REC', 'REC_CARGO_NO_UBICADO', 'DESCONOCIDO'):
+            # Respaldo por posición: franja del cargo en el formato REC. Se usa sin rótulo y también cuando el
+            # recuadro anclado no dio ninguna fecha manuscrita (ancla dudosa). Sus lecturas nunca son ALTA solas.
             zona = zona_cargo_por_posicion(W, H)
             evidence['recuadro_por_posicion'] = [round(zona[0] / W, 6), round(zona[1] / H, 6), round(zona[2] / W, 6), round(zona[3] / H, 6)]
-            evidence['metodo_recuadro'] = motivo + ' Respaldo: recorte por posición.'
+            evidence['metodo_recuadro'] = (motivo if not recuadros else 'El recuadro anclado no dio fecha.') + ' Respaldo: recorte por posición.'
             region = original.crop(zona)
             bandas = bandas_de_tinta(region)
             evidence['bandas_tinta'] = len(bandas)
             margen = max(4, int(0.004 * H))
+            leidas = 0
             for j, (y1, y2) in enumerate(bandas):
                 banda = region.crop((0, max(0, y1 - margen), region.width, min(region.height, y2 + margen)))
                 leer_recuadro(banda, prefijo=f'pos{j+1}_', por_posicion=True)
-            if not evidence['recuadros']:
+                leidas += 1
+                if fecha_manuscrita():
+                    break   # la fecha va antes que la hora y los folios: no hace falta leer las líneas siguientes
+            evidence['bandas_leidas'] = leidas
+            if not evidence['recuadros'] or (sin_fecha_en_recuadro and fecha_manuscrita()):
                 evidence['roi_fecha'] = evidence['recuadro_por_posicion']
             sin_fecha = not {x for seq in candidates for x in seq}
             if sin_fecha and self.vlm is not None:
@@ -1384,6 +1440,11 @@ class MotorOCR:
         if acta:
             evidence['variantes_fecha'].append({'vista': 'acta_negativa', 'texto': 'fecha del acta (no cuenta para la confianza)', 'fechas': acta})
         nonempty = {x for seq in candidates for x in seq}
+        consenso = consenso_manuscrito(evidence['variantes_fecha'])
+        if consenso is not None and len(nonempty) > 1:
+            # Dos lectores manuscritos coinciden y solo el detector impreso discrepa: prevalece el consenso.
+            evidence['detector_ignorado'] = sorted(nonempty - {consenso})
+            nonempty = {consenso}
         evidence['candidatas_corregidas'] = [corregidas[k] for k in sorted(corregidas)]
         evidence['propuesta_corregida'] = False
         # Una lectura es una propuesta; todas requieren confirmación visual.
@@ -1408,8 +1469,8 @@ class MotorOCR:
                 data['observaciones'] += ' Candidatas corregidas distintas: ' + ', '.join(sorted(corregidas)) + '.'
         nivel, coinciden = nivel_confianza(evidence['variantes_fecha'], data['fecha_notificacion'])
         evidence['confianza'] = nivel; evidence['lectores_coinciden'] = coinciden
-        if data['fecha_notificacion'] and not recuadros:
-            data['observaciones'] += ' Leída en un recorte por posición (sin rótulo): comprueba que sea la casilla FECHA DE NOTIFICACIÓN.'
+        if data['fecha_notificacion'] and evidence.get('recuadro_por_posicion') and nivel != 'ALTA':
+            data['observaciones'] += ' Leída en un recorte por posición: comprueba que sea la casilla FECHA DE NOTIFICACIÓN.'
         return data, evidence
 
 class Proyecto:
@@ -2087,6 +2148,74 @@ class Proyecto:
         self.index, self.resumen_hojas, self.epoch = build_index(self.excel, tuple(cfg['hojas']))
         print(f'Excel de Drive actualizado: {destino.name}. Respaldo: {respaldo.name}. Nueva huella: {nueva[:16]}…')
         return destino, respaldo
+
+    def revisar_texto(self, revisor, modo='pendientes', limite=None, entrada=input, mostrar=None):
+        """Revisión sin widgets: muestra los recortes y pide cada decisión con input().
+
+        Para cada foto: Enter confirma la fecha propuesta tal cual; una fecha DD/MM/AAAA la corrige;
+        'e' permite editar expediente, código y resolución; 'p' la deja pendiente; 'o' la omite;
+        's' termina. Confirmar declara que se cotejó la foto. Si la resolución no se leyó, pide
+        la confirmación de REC UNO. Devuelve un resumen con cantidades.
+        """
+        if not str(revisor).strip():
+            raise ValueError('Escribe tu nombre o iniciales en REVISOR.')
+        if mostrar is None:
+            from IPython.display import display as mostrar
+        ids = self.lista_revision(modo)[:limite] if limite else self.lista_revision(modo)
+        res = {'confirmadas': 0, 'pendientes': 0, 'omitidas': 0, 'rechazos': 0}
+        print(f'{len(ids)} fotos para revisar. Enter = confirmar la propuesta | DD/MM/AAAA = corregir fecha | '
+              'e = editar expediente/código/resolución | p = pendiente | o = omitir | s = salir')
+        for n, k in enumerate(ids, 1):
+            r = self.records[k]; ev = r.get('evidencia_ocr') or {}
+            d = dict((r['aprobacion']['datos'] if r.get('aprobacion') else r.get('lectura')) or {})
+            with Image.open(self.path(r)) as src:
+                im = ImageOps.exif_transpose(src).convert('RGB')
+            w, h = im.size
+            cargo = im.crop((0, int(h * .58), w, h)); cargo.thumbnail((1100, 700)); mostrar(cargo)
+            roi = ev.get('roi_fecha')
+            if roi:
+                rec = im.crop((int(roi[0] * w), int(roi[1] * h), int(roi[2] * w), int(roi[3] * h)))
+                rec.thumbnail((1100, 350)); mostrar(rec)
+            target, issues = evaluar(d, self.index)
+            print(f"[{n}/{len(ids)}] {r['archivos'][0]} | {r['estado']} | confianza {r.get('confianza') or '-'}")
+            print(f"  Expediente {d.get('expediente') or '-'} | código {d.get('codigo') or '-'} | resolución {d.get('resolucion') or 'no leída'} | "
+                  f"nombre {d.get('nombre') or '-'} | emisión {d.get('fecha_emision') or '-'}")
+            print(f"  Fecha propuesta: {d.get('fecha_notificacion') or 'NINGUNA'} | destino {target['celda'] if target else '-'}")
+            for v in ev.get('variantes_fecha') or []:
+                print(f"    {v['vista']:<18} {', '.join(v.get('fechas') or []) or '-'}")
+            for aviso in alertas(d, target, ev): print('  ALERTA:', aviso)
+            if issues: print('  Comprobaciones:', '; '.join(issues))
+            while True:
+                op = str(entrada('  Decisión: ')).strip()
+                if op.lower() == 's':
+                    print('Fin de la revisión.', res); return res
+                if op.lower() == 'o':
+                    res['omitidas'] += 1; break
+                if op.lower() == 'p':
+                    if r.get('aprobacion'): r.setdefault('historial_aprobaciones', []).append(r['aprobacion'])
+                    r.update(estado='PENDIENTE', aprobacion=None); self.save(r); res['pendientes'] += 1; break
+                if op.lower() == 'e':
+                    for campo in ('expediente', 'codigo', 'resolucion'):
+                        nuevo = str(entrada(f'    {campo} [{d.get(campo) or ""}]: ')).strip()
+                        if nuevo: d[campo] = nuevo
+                    continue
+                if op:
+                    if fecha(op) is None:
+                        print('  Fecha no válida; usa DD/MM/AAAA.'); continue
+                    d['fecha_notificacion'] = op
+                elif not d.get('fecha_notificacion'):
+                    print('  No hay fecha propuesta: escribe la fecha, p, o o s.'); continue
+                rec_uno = False
+                if not d.get('resolucion'):
+                    rec_uno = str(entrada('  La resolución no se leyó. ¿Verificaste en la foto que es la REC UNO? (s/n): ')).strip().lower() == 's'
+                try:
+                    self.aprobar(k, d, revisor, verifico_rec_uno=rec_uno)
+                    res['confirmadas'] += 1; print('  Confirmada.'); break
+                except ValueError as e:
+                    res['rechazos'] += 1; print('  No se pudo confirmar:', str(e).replace('\n', ' | '))
+                    break
+        print('Revisión terminada.', res)
+        return res
 
     def exportar(self, doble_revision=False):
         """Escribe las fechas aprobadas en una copia del Excel y deja constancia.

@@ -235,7 +235,9 @@ class FiabilidadTests(unittest.TestCase):
             ([v('vlm_color',[F])],F,'MEDIA',['vlm']),
             ([v('color',[F]),v('trocr_color',[F]),v('vlm_color',[])],F,'MEDIA',['detector','trocr']),
             ([v('trocr_color',[F]),v('vlm_color',[G])],None,'CONTRADICTORIA',[]),
-            ([v('color',[G]),v('trocr_color',[F]),v('vlm_color',[F])],None,'CONTRADICTORIA',[]),  # el detector contradice
+            ([v('color',[G]),v('trocr_color',[F]),v('vlm_color',[F])],F,'ALTA',['trocr','vlm']),  # el detector discrepa: prevalecen dos manuscritos (piloto 3)
+            ([v('color',[G]),v('trocr_color',[F])],None,'CONTRADICTORIA',[]),                      # un solo manuscrito no basta para ignorar al detector
+            ([v('color',[G]),v('trocr_color',[F]),v('vlm_color',[F]),v('api_color',[G])],None,'CONTRADICTORIA',[]),  # un manuscrito discrepa
             ([v('trocr_color',[F]),v('vlm_color',[F]),v('acta_negativa',[G])],F,'ALTA',['trocr','vlm']),  # el acta no interviene
             ([v('color',[]),v('trocr_color',[])],None,'SIN_FECHA',[]),
             ([],None,'SIN_FECHA',[]),
@@ -243,6 +245,11 @@ class FiabilidadTests(unittest.TestCase):
         for variantes,prop,nivel,lectores in casos:
             with self.subTest(nivel=nivel,variantes=[x['vista'] for x in variantes]):
                 self.assertEqual(c.nivel_confianza(variantes,prop),(nivel,lectores))
+        # El prefijo del recuadro no cambia la familia del lector.
+        for vista,fam in [('pos1_trocr_color','trocr'),('r2_vlm_color','vlm'),('pos12_api_color','api'),('pos1_tinta','detector'),('r2_color','detector'),('acta_negativa','acta')]:
+            self.assertEqual(c.familia_lector(vista),fam)
+        self.assertEqual(c.nivel_confianza([dict(v('pos1_trocr_color',[F]),por_posicion=True),dict(v('pos1_vlm_color',[F]),por_posicion=True)],F),('MEDIA',['trocr','vlm']))   # manuscritos por posición: nunca ALTA
+        self.assertEqual(c.consenso_manuscrito([v('pos1_trocr_color',[F]),v('pos2_vlm_color',[F]),v('pos1_tinta',[G])]),F)
         class M: vlm=None
         self.assertIn('no es alcanzable',c.aviso_lectores(M()))
         M.vlm=object(); self.assertIn('Qwen2.5-VL',c.aviso_lectores(M()))
@@ -357,6 +364,34 @@ class ExportacionLegalTests(ProyectoBase):
         drive.write_bytes(drive.read_bytes()+b' ')
         with self.assertRaises(ValueError):
             p.actualizar_excel_en_drive(copia,drive)
+    def test_revision_en_modo_texto(self):
+        p=self.preparar(); ids=sorted(p.active)
+        for k in ids:
+            p.records[k]['lectura'].update(expediente='16-012-1-2026')
+        mostradas=[]
+        respuestas=iter(['',            # foto 1: confirma la propuesta
+                         's'])          # foto 2: sale
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res=p.revisar_texto('Ana',entrada=lambda msg: next(respuestas),mostrar=mostradas.append)
+        orden=p.lista_revision('todos')
+        self.assertEqual(res['confirmadas'],1); self.assertGreaterEqual(len(mostradas),1)
+        confirmadas=[k for k in ids if p.records[k]['estado']=='APROBADO']
+        self.assertEqual(len(confirmadas),1); self.assertEqual(p.records[confirmadas[0]]['aprobacion']['revisor'],'Ana')
+        self.assertIn('Fecha propuesta',out.getvalue())
+        # Corregir la fecha y responder REC UNO; dejar otra pendiente.
+        restantes=[k for k in p.lista_revision('pendientes')]
+        p.records[restantes[0]]['lectura']['resolucion']=None
+        respuestas=iter(['16/09/2026','s',  # corrige la fecha y confirma REC UNO
+                         'p'])               # la siguiente queda pendiente
+        with contextlib.redirect_stdout(io.StringIO()):
+            res=p.revisar_texto('Luis',entrada=lambda msg: next(respuestas),mostrar=lambda im: None)
+        self.assertEqual((res['confirmadas'],res['pendientes']),(1,1))
+        r=p.records[restantes[0]]
+        self.assertEqual(r['aprobacion']['datos']['fecha_notificacion'],'16/09/2026'); self.assertTrue(r['aprobacion']['verifico_rec_uno'])
+        self.assertEqual(p.records[restantes[1]]['estado'],'PENDIENTE')
+        # Fecha inválida se vuelve a pedir; sin revisor no arranca.
+        with self.assertRaises(ValueError):
+            p.revisar_texto('',entrada=lambda m: 's',mostrar=lambda im: None)
     def test_resolucion_no_leida_exige_casilla(self):
         p=self.preparar(); rid=sorted(p.active)[0]
         sin=self.datos(); sin['resolucion']=None
@@ -444,6 +479,16 @@ class LocalizacionTests(unittest.TestCase):
         self.assertEqual(c.localizar_recuadros_fecha([caja(1000,300,1500,330,'NOTIFICACION:')],self.W,self.H)[0],[])
         for texto in ('NOTIFICACION DE EMISION','FECHA DE NOTIFICACION DE VENCIMIENTO'):
             self.assertEqual(c.localizar_recuadros_fecha([caja(1000,1900,1500,1930,texto)],self.W,self.H)[0],[])
+        # Piloto 3: 'NOTIFICACIÓN' de otras casillas (izquierda o derecha) no es ancla; en la columna central sí.
+        self.assertEqual(c.localizar_recuadros_fecha([caja(450,1900,850,1930,'ACTA DE NOTIFICACION')],self.W,self.H)[0],[])
+        self.assertEqual(c.localizar_recuadros_fecha([caja(1500,1900,1850,1930,'PERSONAL QUE NOTIFICA')],self.W,self.H)[0],[])
+        self.assertEqual(c.localizar_recuadros_fecha([caja(450,1900,850,1930,'NOTIFICACION:')],self.W,self.H)[0],[])     # izquierda, sin apoyo
+        self.assertEqual(c.localizar_recuadros_fecha([caja(1500,1900,1850,1930,'NOTIFICACION:')],self.W,self.H)[0],[])   # derecha, sin apoyo
+        recs,_=c.localizar_recuadros_fecha([caja(1500,1900,1850,1930,'NOTIFICACION:'),caja(1500,1990,1850,2020,'FOLIOS ENTREGADOS:')],self.W,self.H)
+        self.assertEqual(recs[0][1],'rotulo_notificacion_hora')                                                       # derecha pero con FOLIOS debajo
+        rows=[caja(450,1900,850,1930,'NOTIFICACION:'),caja(1000,1900,1500,1930,'NOTIFICACION:'),caja(1500,1900,1850,1930,'NOTIFICACION:')]
+        recs,_=c.localizar_recuadros_fecha(rows,self.W,self.H)
+        self.assertTrue(all(1000-0.015*self.W-1<=r[0][0]<1000 for r in recs))                                        # gana la central
         # Rótulos de otras fechas no se aceptan como ancla.
         for texto in ('FECHA DE EMISION','FECHA DE VENCIMIENTO','FECHA DE EMISION REC','FECHA DE EMISION:','FECHA Y HORA','FECHA:'):
             with self.subTest(texto=texto):
@@ -770,6 +815,30 @@ class ImagenesSinteticasTests(unittest.TestCase):
         d,ev=m.leer(ruta)
         self.assertTrue(ev['zoom_rotulos']); self.assertEqual(ev['tipo'],'REC'); self.assertEqual(ev['recuadros'][0]['metodo'],'rotulo_fecha')
         self.assertEqual(d['fecha_notificacion'],'2026-09-15'); self.assertNotIn('recuadro_por_posicion',ev)
+    def test_piloto3_detector_no_anula_y_digito_perdido(self):
+        # REC 11150: TrOCR y Qwen leen 18/09/2026; el detector lee '/8 09 26' (el 1 como barra).
+        ruta=self.guardar(pagina_sintetica(fecha='18/09/2026'))
+        pie=[caja(480,258,760,290,'FECHA DE NOTIFICACION:'),caja(480,340,760,372,'HORA DE NOTIFICACION:')]
+        m=self.motor(pie,con_vlm=True,fecha='18/09/2026')
+        base=m.read
+        m.read=lambda im,digits=False: [caja(0,0,50,20,'/8 09 26')] if digits else base(im,digits)
+        d,ev=m.leer(ruta)
+        self.assertEqual((d['fecha_notificacion'],ev['confianza']),('2026-09-18','ALTA'))
+        self.assertEqual(ev['lecturas_descartadas'][0]['motivo'],'dígito inicial perdido')
+        # Si el detector lee otra fecha sin barra (p. ej. 08/09/2026), se ignora igual frente a dos manuscritos coincidentes.
+        m.read=lambda im,digits=False: [caja(0,0,50,20,'08 09 2026')] if digits else base(im,digits)
+        d,ev=m.leer(ruta)
+        self.assertEqual((d['fecha_notificacion'],ev['confianza']),('2026-09-18','ALTA')); self.assertEqual(ev['detector_ignorado'],['2026-09-08'])
+    def test_piloto3_respaldo_si_el_recuadro_anclado_no_da_fecha(self):
+        # Ancla aceptada pero en una casilla sin manuscrito (columna equivocada): se lee además por posición.
+        ruta=self.guardar(pagina_sintetica(con_rotulo=False))
+        pie=[caja(480,170,760,200,'FECHA DE NOTIFICACION:')]   # recuadro en y 870-950 de la página: sin tinta
+        m=self.motor(pie,con_vlm=True)
+        d,ev=m.leer(ruta)
+        self.assertEqual(ev['tipo'],'REC'); self.assertEqual(len(ev['recuadros']),1)
+        self.assertIn('El recuadro anclado no dio fecha',ev['metodo_recuadro']); self.assertIn('recuadro_por_posicion',ev)
+        self.assertEqual(d['fecha_notificacion'],'2026-09-15'); self.assertEqual(ev['confianza'],'MEDIA')   # por posición: nunca ALTA
+        self.assertEqual(ev['roi_fecha'],ev['recuadro_por_posicion']); self.assertEqual(ev['bandas_leidas'],1)
     def test_bandas_de_tinta(self):
         im=Image.new('RGB',(400,200),'white'); dr=ImageDraw.Draw(im)
         dr.rectangle((50,30,300,50),fill=(40,60,200)); dr.rectangle((50,120,200,150),fill=(40,60,200)); dr.line((0,100,400,100),fill='black',width=3)
@@ -846,6 +915,16 @@ class LectorAPITests(unittest.TestCase):
             r=l.read(Image.new('RGB',(60,20),'white'))
         self.assertTrue(l.agotado); self.assertIn('no disponible para esta clave',l.motivo_desactivado); self.assertIn('API_MODELO',out.getvalue())
         self.assertTrue(r.startswith('ERROR')); self.assertIn('no disponible',l.read(Image.new('RGB',(60,20),'white'))); self.assertEqual(l.llamadas,1)
+    def test_429_con_limite_cero_da_pista(self):
+        import urllib.error
+        c.time.sleep=lambda s: None
+        l=c.LectorAPI('gemini',api_key='k',max_cuota_seguidos=2)
+        def e429():
+            e=urllib.error.HTTPError('u',429,'x',{},None); e.detalle='{"error":{"message":"Quota exceeded ... limit: 0, model: gemini-3.8-flash"}}'; return e
+        l._peticion=lambda cuerpo: (_ for _ in ()).throw(e429())
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            l.read(Image.new('RGB',(60,20),'white'))
+        self.assertTrue(l.agotado); self.assertIn('límite 0',l.motivo_desactivado); self.assertIn('API_MODELO',out.getvalue())
     def test_sin_clave_y_proveedor(self):
         import os
         os.environ.pop('DEEPSEEK_API_KEY',None)
@@ -902,6 +981,8 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('@param',''.join(cells[0]['source']))
         self.assertIn('def configurar(',''.join(cells[1]['source']))
         self.assertIn('DOBLE_REVISION',''.join(cells[5]['source']))
+        self.assertIn('revisar_texto',''.join(cells[4]['source'])); self.assertIn("FORMA = 'texto'",''.join(cells[4]['source']))
+        self.assertIn("'ipywidgets>=7.6,<9'",''.join(cells[0]['source']))
         self.assertIn('ESCRIBIR_EN_EXCEL_DE_DRIVE',''.join(cells[5]['source']))
         self.assertIn('EXCEL_DRIVE',''.join(cells[1]['source']))
         self.assertIn('LECTOR_VLM',''.join(cells[3]['source']))
@@ -911,7 +992,7 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('medir_acierto',''.join(cells[2]['source']))
         self.assertIn('MUESTRA = 200',''.join(cells[2]['source']))
         self.assertIn('REPROCESAR_MUESTRA',''.join(cells[2]['source']))
-        self.assertIn('LECTOR_API',''.join(cells[3]['source'])); self.assertIn('GEMINI_API_KEY',''.join(cells[2]['source'])); self.assertIn('API_PAUSA_S',''.join(cells[3]['source'])); self.assertIn("API_MODELO = 'gemini-3.8-flash'",''.join(cells[2]['source'])); self.assertIn('API_MODELO',''.join(cells[3]['source']))
+        self.assertIn('LECTOR_API',''.join(cells[3]['source'])); self.assertIn('GEMINI_API_KEY',''.join(cells[2]['source'])); self.assertIn('API_PAUSA_S = 15',''.join(cells[3]['source'])); self.assertIn("API_MODELO = 'gemini-3.8-flash'",''.join(cells[2]['source'])); self.assertIn('API_MODELO',''.join(cells[3]['source']))
     def test_notebook_matches_templates(self):
         nb=json.loads(self.path.read_text(encoding='utf-8'))
         self.assertEqual(nb,self.builder.render(),'Ejecuta python scripts/build_notebook.py y confirma el cuaderno.')

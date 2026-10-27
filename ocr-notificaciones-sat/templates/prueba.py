@@ -10,7 +10,7 @@ LECTOR_VLM = True  # @param {type:"boolean"}
 ORIENTACION_AUTO = False  # @param {type:"boolean"}
 VLM_DOS_VISTAS = True  # @param {type:"boolean"}
 LECTOR_API = 'ninguno'  # @param ["ninguno", "gemini", "deepseek"]
-API_PAUSA_S = 6  # @param {type:"integer"}
+API_PAUSA_S = 15  # @param {type:"integer"}
 API_MODELO = 'gemini-3.8-flash'  # @param {type:"string"}
 # Procesa una muestra repartida entre carpetas para medir velocidad y calidad de lectura.
 # MOTOR auto: PaddleOCR en el entorno aislado (celda 1) si supera una prueba; si no, PaddleOCR en este proceso; si no, EasyOCR.
@@ -30,8 +30,8 @@ API_MODELO = 'gemini-3.8-flash'  # @param {type:"string"}
 #   activado): GEMINI_API_KEY o DEEPSEEK_API_KEY. Nunca la escribas en el cuaderno.
 # API_MODELO: modelo del proveedor (Gemini retira modelos para claves nuevas; si la API responde 404 'no longer available',
 #   escribe aquí el que indique el mensaje). Vacío = el predeterminado del proveedor.
-# API_PAUSA_S: segundos entre llamadas. El nivel gratuito de Gemini limita peticiones por minuto y por día; con 6 s se
-#   respetan unas 10 por minuto. Si la cuota diaria se agota, el lector se desactiva solo y los demás siguen.
+# API_PAUSA_S: segundos entre llamadas. El nivel gratuito de Gemini limita peticiones por minuto y por día; con 15 s se
+#   respetan unas 4 por minuto. Si la cuota diaria se agota, el lector se desactiva solo y los demás siguen.
 if 'proyecto' not in globals():
     raise RuntimeError('Ejecuta antes las celdas 1 y 2.')
 if MUESTRA < 1:
